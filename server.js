@@ -2,69 +2,102 @@ require('dotenv').config();
 const fs = require('fs'), express = require('express'), session = require('express-session'), bcrypt = require('bcryptjs');
 const { Client, GatewayIntentBits: G, Partials, Events } = require('discord.js');
 const { DISCORD_TOKEN, GUILD_ID, SESSION_SECRET, OWNER_USER = 'owner', OWNER_PASS, PORT = 3000 } = process.env;
+const GIDS = (process.env.GUILD_IDS || GUILD_ID || '').split(',').map(x => x.trim()).filter(Boolean);
+if (!GIDS.length) { console.error('GUILD_IDS(サーバーID。複数ならカンマ区切り)を設定してください'); process.exit(1); }
 if (!SESSION_SECRET || !OWNER_PASS) { console.error('SESSION_SECRET と OWNER_PASS を設定してください'); process.exit(1); }
 
 // ---- 保存(JSONファイル) ----
 const FILE = 'data/db.json';
 fs.mkdirSync('data', { recursive: true });
-const db = fs.existsSync(FILE) ? JSON.parse(fs.readFileSync(FILE, 'utf8'))
-  : { users: [], msgs: [], dms: [], logs: [], cases: [], reqs: [], seq: 1 };
+const db = Object.assign({ users: [], msgs: [], dms: [], logs: [], cases: [], reqs: [], dmlog: [], seq: 1 },
+  fs.existsSync(FILE) ? JSON.parse(fs.readFileSync(FILE, 'utf8')) : {});
 const save = () => fs.writeFileSync(FILE, JSON.stringify(db));
-const now = () => new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
-if (!db.users.length) { db.users.push({ name: OWNER_USER, hash: bcrypt.hashSync(OWNER_PASS, 10), role: 'owner' }); save(); }
+const nid = () => db.seq++;
+const now = () => new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(0, 16);
+if (!db.users.length) db.users.push({ name: OWNER_USER, hash: bcrypt.hashSync(OWNER_PASS, 10), role: 'owner' });
+db.users.forEach(u => { u.id ??= nid(); u.guilds ??= [...GIDS]; });
+[...db.cases, ...db.reqs, ...db.msgs].forEach(x => { x.gid ??= GIDS[0]; });
+db.dms.forEach(d => { d.gids ??= [GIDS[0]]; }); save();
 
-// ---- 権限(ここを書き換えれば権限を調整できます) ----
+// ---- 権限(ここを書き換えれば調整できます) ----
+// direct: BAN/KICK/60分超のタイムアウトを承認なしで実行 / approve: 申請の承認 / logsAll: 全員の操作ログ / accounts: アカウント管理 / delMsg: 管理者間通信のメッセージ削除
 const ROLES = { owner: '最高管理者', admin: '管理者', junior: '新任管理者' };
-const CAN = {
-  owner: ['ban', 'kick', 'timeout', 'warn', 'approve', 'dm', 'logs', 'accounts'],
-  admin: ['ban', 'kick', 'timeout', 'warn', 'approve', 'dm', 'logs'],
-  junior: ['timeout', 'warn'], // BAN/KICKは「申請」→管理者が承認
-};
+const CAN = { owner: ['direct', 'approve', 'logsAll', 'accounts', 'delMsg'], admin: ['direct', 'approve', 'logsAll'], junior: [] };
 const can = (u, p) => CAN[u.role].includes(p);
+const allowed = u => u.role === 'owner' ? GIDS : GIDS.filter(g => (u.guilds || []).includes(g));
+const gname = id => bot.guilds.cache.get(id)?.name || id;
+const visDm = (u, d) => d.gids.includes(u.gid) || (!d.gids.length && u.role === 'owner');
 const TYPES = { ban: 'BAN', kick: 'KICK', timeout: 'タイムアウト', warn: '警告' };
+const DUR = [5, 10, 30, 60, 180, 360, 720, 1440, 4320, 10080, 40320];
+const fmtMin = m => m % 1440 === 0 ? `${m / 1440}日` : m % 60 === 0 ? `${m / 60}時間` : `${m}分`;
 const isId = s => /^\d{15,22}$/.test(s || '');
+const pun = (t, m) => TYPES[t] + (t === 'timeout' ? `(${fmtMin(m)})` : '');
 
 // ---- Discord ----
 const bot = new Client({ intents: [G.Guilds, G.GuildMembers, G.DirectMessages], partials: [Partials.Channel, Partials.Message] });
-bot.on(Events.MessageCreate, m => {
+bot.on(Events.MessageCreate, async m => {
   if (m.guild || m.author.bot) return;
-  db.dms.unshift({ t: now(), uid: m.author.id, name: m.author.tag, text: m.content });
+  const gids = [];
+  for (const g of GIDS) if (await bot.guilds.fetch(g).then(x => x.members.fetch(m.author.id)).catch(() => null)) gids.push(g);
+  db.dms.unshift({ id: nid(), t: now(), uid: m.author.id, name: m.author.tag, text: m.content, gids });
   db.dms = db.dms.slice(0, 300); save();
 });
 bot.login(DISCORD_TOKEN);
 
-const log = (u, text) => { db.logs.unshift({ t: now(), who: u.name, text }); db.logs = db.logs.slice(0, 500); save(); };
-async function exec(u, type, uid, reason, min) {
+const log = (who, op, target = '', detail = '', gid) => {
+  db.logs.unshift({ t: now(), who, op, target, detail: String(detail).slice(0, 200), gid });
+  db.logs = db.logs.slice(0, 1000); save();
+};
+async function exec(by, type, uid, reason, min, notify, gid) {
+  if (!GIDS.includes(gid)) throw new Error('サーバーが選択されていません');
+  if (notify && reason) await bot.users.send(uid, `【${gname(gid)} / ${TYPES[type]}】${reason}`).catch(() => {});
   if (type !== 'warn') {
-    const g = await bot.guilds.fetch(GUILD_ID);
+    const g = await bot.guilds.fetch(gid);
     if (type === 'ban') await g.members.ban(uid, { reason });
     else {
       const m = await g.members.fetch(uid);
       if (type === 'kick') await m.kick(reason); else await m.timeout(min * 60000, reason);
     }
   }
-  db.cases.unshift({ t: now(), type, uid, reason, min, by: u.name }); save();
-  log(u, `${TYPES[type]} ${uid}(${reason})`);
+  db.cases.unshift({ id: nid(), t: now(), type, uid, reason, min, by, gid }); save();
+  log(by, pun(type, min), uid, reason, gid);
 }
 
-// ---- 画面 ----
+// ---- 画面部品 ----
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const page = (u, title, body, note = '') => `<!doctype html><meta charset=utf-8>
-<meta name=viewport content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>
-body{font:15px sans-serif;margin:0;background:#ddd;color:#111}
-header{background:#2a45b5;color:#fff;padding:10px 16px;letter-spacing:.1em}
-main{max-width:900px;margin:12px auto;padding:0 12px}
-.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
-a.b,button{background:#eee;border:2px outset #fff;padding:8px 14px;color:#111;text-decoration:none;font:inherit;cursor:pointer;margin:2px}
-fieldset{margin:0 0 12px;border:1px solid #999}
-input,select,textarea{font:inherit;padding:6px;width:100%;box-sizing:border-box;margin:4px 0}
-table{border-collapse:collapse;width:100%;background:#fff}td,th{border:1px solid #aaa;padding:6px;text-align:left;vertical-align:top;white-space:pre-wrap}
-.note{background:#fff;border:1px solid #999;padding:8px;margin-bottom:12px}
-</style><header>管理システム端末${u ? ` ｜ ${esc(u.name)}(${ROLES[u.role]})` : ''}</header><main>
-${u ? '<div class=bar><a class=b href=/>メニュー</a><a class=b href=/logout>終了</a></div>' : ''}${note ? `<div class=note>${esc(note)}</div>` : ''}${body}</main>`;
+const KEYS = ['メニュー', '戻る', '保存', '更新', '開始', '終了', '承認', '却下', '照会', '発信', '予約', '保持', '解放'];
+const ACT = { メニュー: "location='/'", 戻る: 'history.back()', 更新: 'location.reload()', 終了: "location='/logout'", 照会: 'doLookup()', 発信: 'doSend()', 解放: 'doReset()' };
+const BASE = ['メニュー', '戻る', '更新', '終了'], FORM = [...BASE, '照会', '発信', '解放'];
+const status = u => `<div class=st>係員 <span class=v>${esc(u.name)}</span> 権限区分 <span class=v>${ROLES[u.role]}</span> サーバー <form method=post action=/server><select name=gid onchange="this.form.submit()">${allowed(u).map(g => `<option value="${g}"${g === u.gid ? ' selected' : ''}>${esc(gname(g))}`).join('')}</select></form> 日時 <span class=v>${now()}</span> BOT <span class=v>${bot.isReady() ? `稼働中 ${bot.ws.ping}ms` : '停止中'}</span> 未読 <span class=v>${db.msgs.filter(m => m.to === u.name && !m.read && m.gid === u.gid).length} 件</span> <a class=b href=/inbox>管理者間通信</a> <a class=b href=/password>パスワード変更</a></div>`;
+const page = (u, title, body, on = BASE, act = {}) => `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>管理システム端末</title><style>
+body{margin:0;background:#d9d9d9;font:14px sans-serif;color:#111}
+h1{margin:0;background:linear-gradient(#2a45b5,#1a2f9a);color:#fff;text-align:center;font-weight:400;font-size:15px;letter-spacing:.2em;padding:13px 8px}
+.w{max-width:1000px;margin:0 auto;padding:10px}.tb{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px}
+button,a.b{font:inherit;background:#e4e4e4;border:2px outset #fff;padding:9px 16px;color:#111;text-decoration:none;cursor:pointer;display:inline-block}
+button:disabled{color:#999;background:#d2d2d2;cursor:default}button.on,a.cur{font-weight:700}
+.st{margin:8px 0;display:flex;flex-wrap:wrap;gap:6px;align-items:center}.st select{width:auto;display:inline-block;margin:0}.st form{display:inline;margin:0}.v{display:inline-block;background:#f4f4f4;border:2px inset #fff;padding:7px 10px;white-space:nowrap}
+input,select,textarea{font:inherit;padding:7px;box-sizing:border-box;background:#f4f4f4;border:2px inset #fff}
+form input:not([type=checkbox]),form select,form textarea{width:100%;max-width:600px;display:block;margin:4px 0 12px}
+fieldset{border:1px solid #999;padding:10px;margin:0 0 12px}
+table{width:100%;border-collapse:collapse;background:#f4f4f4}td,th{border:1px solid #999;padding:7px;text-align:left;vertical-align:top;white-space:pre-wrap}th{background:#c8c8c8}
+.note{background:#eee;border:1px solid #999;padding:9px;margin:6px 0 12px}
+.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px}
+.tile{display:block;background:#e4e4e4;border:2px outset #fff;padding:12px 8px;text-align:center;color:#111;text-decoration:none;min-height:48px}
+.tile small{display:block;margin-top:6px;background:#eee;border:1px solid #999;padding:2px;font-size:12px}.tile.off{background:#d0d0d0;border:2px solid #ccc}
+</style><h1>管理システム端末(version 5.0.0) ${esc(title)}</h1><div class=w>
+<div class=tb>${KEYS.map(k => on.includes(k) ? `<button type=button class=on onclick="${act[k] || ACT[k]}">${k}</button>` : `<button disabled>${k}</button>`).join('')}</div>
+${u ? status(u) : ''}${body}</div><script>
+function F(){return document.querySelector('form.main')}
+function doLookup(){var f=F(),i=f&&f.elements.uid;if(f&&f.method=='get')f.submit();else location='/history'+(i&&i.value?'?uid='+encodeURIComponent(i.value):'')}
+function doSend(){var f=F();if(f){f.requestSubmit?f.requestSubmit():f.submit()}}
+function doReset(){var f=F();if(f)f.reset()}</script>`;
+const note = t => t ? `<div class=note>${esc(t)}</div>` : '';
+const fs_ = (legend, inner) => `<fieldset><legend>${esc(legend)}</legend>${inner}</fieldset>`;
+const done = (u, title, t, on) => page(u, title, fs_(title, note(t)), on);
+const bad = (res, u, t) => res.status(400).send(done(u, 'エラー', t));
 const table = (head, rows) => `<table><tr>${head.map(h => `<th>${h}</th>`).join('')}</tr>${rows.join('')}</table>`;
 const tr = cells => `<tr>${cells.map(c => `<td>${c}</td>`).join('')}</tr>`;
-const loginForm = '<form method=post><label>アカウント<input name=name required></label><label>パスワード<input name=pass type=password required></label><button>ログイン</button></form>';
+const empty = t => `<table><tr><td>${t}</td></tr></table>`;
 
 const app = express();
 app.set('trust proxy', 1);
@@ -72,127 +105,206 @@ app.use(express.urlencoded({ extended: false }));
 app.use(session({ secret: SESSION_SECRET, resave: false, saveUninitialized: false, cookie: { httpOnly: true, sameSite: 'lax', secure: 'auto', maxAge: 8 * 3600e3 } }));
 
 const auth = perm => (req, res, next) => {
-  const u = db.users.find(x => x.name === req.session.name);
-  if (!u) return res.redirect('/login');
-  if (perm && !can(u, perm)) return res.status(403).send(page(u, '権限なし', '', 'この操作の権限がありません。'));
+  const u0 = db.users.find(x => x.id === req.session.uid);
+  if (!u0) return res.redirect('/login');
+  const al = allowed(u0), u = { ...u0, gid: al.includes(req.session.gid) ? req.session.gid : al[0] };
+  if (perm && !can(u, perm)) { log(u.name, '権限なしの操作', '', req.path, u.gid); return res.status(403).send(done(u, '権限なし', 'この操作の権限がありません。')); }
   req.u = u; next();
 };
 
-// ログイン(5回失敗で10分ロック)
+// ---- ログイン(5回失敗で10分ロック) ----
 const fails = {};
-app.get('/login', (req, res) => res.send(page(null, 'ログイン', loginForm)));
+const loginPage = t => page(null, 'ログイン', fs_('ログイン', `${note(t)}<form method=post><label>アカウント<input name=name required autocomplete=username></label><label>パスワード<input name=pass type=password required autocomplete=current-password></label><button>ログイン</button></form>`), []);
+app.get('/login', (req, res) => res.send(loginPage()));
 app.post('/login', (req, res) => {
   let f = fails[req.ip];
   if (!f || Date.now() - f.t > 6e5) f = fails[req.ip] = { n: 0, t: Date.now() };
-  if (f.n >= 5) return res.status(429).send(page(null, 'ログイン', loginForm, '試行回数が多すぎます。10分後にやり直してください。'));
+  if (f.n >= 5) return res.status(429).send(loginPage('試行回数が多すぎます。10分後にやり直してください。'));
   const u = db.users.find(x => x.name === req.body.name);
   if (u && bcrypt.compareSync(req.body.pass || '', u.hash)) {
     delete fails[req.ip];
-    return req.session.regenerate(() => { req.session.name = u.name; res.redirect('/'); });
+    return req.session.regenerate(() => { req.session.uid = u.id; log(u.name, 'ログイン'); res.redirect('/'); });
   }
-  f.n++; f.t = Date.now();
-  res.status(401).send(page(null, 'ログイン', loginForm, 'アカウントまたはパスワードが違います'));
+  f.n++; f.t = Date.now(); log(String(req.body.name || '').slice(0, 20), 'ログイン失敗');
+  res.status(401).send(loginPage('アカウントまたはパスワードが違います'));
 });
-app.get('/logout', (req, res) => req.session.destroy(() => res.redirect('/login')));
+app.get('/logout', (req, res) => {
+  const u = db.users.find(x => x.id === req.session.uid); if (u) log(u.name, 'ログアウト');
+  req.session.destroy(() => res.redirect('/login'));
+});
 
+app.post('/server', auth(), (req, res) => { if (allowed(req.u).includes(req.body.gid)) req.session.gid = req.body.gid; res.redirect('/'); });
+
+// ---- メインメニュー ----
 app.get('/', auth(), (req, res) => {
-  const u = req.u, unread = db.msgs.filter(m => m.to === u.name && !m.read).length;
-  const L = (p, h, t) => (!p || can(u, p)) ? `<a class=b href=${h}>${t}</a>` : '';
-  res.send(page(u, 'メインメニュー', `<div class=note>BOT: ${bot.isReady() ? `稼働中 ${bot.ws.ping}ms` : '停止中'}　未読: ${unread}件</div>
-<fieldset><legend>処分業務</legend>${Object.keys(TYPES).map(t => L(t, `/act/${t}`, TYPES[t])).join('')}</fieldset>
-<fieldset><legend>申請・承認</legend>${L('', '/reqs', '申請一覧')}${L('', '/cases', '処分履歴照会')}${L('logs', '/logs', '操作ログ')}</fieldset>
-<fieldset><legend>通信業務</legend>${L('dm', '/dms', 'DM受信')}${L('dm', '/dm', 'DM送信')}${L('', '/inbox', '管理者間通信')}</fieldset>
-<fieldset><legend>設定業務</legend>${L('accounts', '/accounts', 'アカウント管理')}${L('', '/password', 'パスワード変更')}</fieldset>`));
+  const u = req.u;
+  const T = (h, t, s, ok = 1) => ok ? `<a class=tile href="${h}"><b>${t}</b><small>${s}</small></a>` : '<span class="tile off"></span>';
+  const Gp = (t, items) => fs_(t, `<div class=g>${items.join('')}</div>`);
+  res.send(page(u, 'メインメニュー',
+    Gp('処分業務(BAN・KICK・タイムアウト)', [T('/act/ban', 'BAN', 'ユーザー追放'), T('/act/kick', 'KICK', 'ユーザー退出'), T('/act/timeout', 'タイムアウト', '発言停止'), T('/act/warn', '警告', '警告記録')]) +
+    Gp('申請・承認', [T('/approve', '申請承認', '承認待ち', can(u, 'approve')), T('/myreqs', '自分の申請', '申請状況'), T('/logs', '操作ログ', '実行履歴'), T('/history', '処分履歴照会', 'アカウント別')]) +
+    Gp('通信業務', [T('/dms', 'DM受信', 'BOT宛DM'), T('/dm', 'DM送信', 'ユーザー宛DM'), T('/inbox', '管理者間通信', 'サイト内・メール'), T('/allmsgs', '全メッセージ管理', 'メッセージ削除', can(u, 'delMsg'))]) +
+    Gp('設定業務', [T('/accounts', 'アカウント管理', '追加・削除', can(u, 'accounts')), T('/password', 'パスワード変更', '自分のパスワード')]), ['更新', '終了']));
 });
 
-// 処分
+// ---- 処分(BAN/KICK/タイムアウト/警告) ----
 app.get('/act/:type', auth(), (req, res) => {
-  const t = req.params.type, u = req.u;
-  if (!TYPES[t] || !can(u, t)) return res.status(403).send(page(u, '権限なし', '', 'この操作の権限がありません。BAN/KICKは「申請一覧」から申請してください。'));
-  res.send(page(u, TYPES[t], `<form method=post><label>ユーザーID<input name=uid required pattern="\\d{15,22}"></label>
-<label>理由<input name=reason required maxlength=200></label>${t === 'timeout' ? `<label>分数<input name=min type=number min=1 max=${u.role === 'junior' ? 60 : 40320} required></label>` : ''}<button>実行</button></form>`));
+  const t = req.params.type, u = req.u, direct = can(u, 'direct');
+  if (!TYPES[t]) return res.redirect('/');
+  if (!u.gid) return res.send(done(u, TYPES[t], '操作できるサーバーが割り当てられていません。'));
+  const top = direct || t === 'warn' ? '' : t === 'timeout' ? '新任管理者の操作は、管理者以上の承認が必要です。タイムアウトは60分(1時間)までなら、承認なしで実行できます。' : '新任管理者の操作は、管理者以上の承認が必要です。';
+  const uid = '<label>対象のDiscordユーザーID<input name=uid required pattern="\\d{15,22}" inputmode=numeric></label>';
+  const rest = t === 'warn' ? '<label>警告の内容(本人にDMで送られます)<textarea name=reason rows=5 required maxlength=200></textarea></label>'
+    : (t === 'timeout' ? `<label>時間<select name=min>${DUR.map(m => `<option value=${m}${m === 60 ? ' selected' : ''}>${fmtMin(m)}`).join('')}</select></label>` : '') +
+      '<label>理由(任意)<input name=reason maxlength=200></label><label><input type=checkbox name=notify value=1> この理由をBOT経由で本人にDMで送る</label>';
+  res.send(page(u, TYPES[t], fs_(TYPES[t], `${note('対象サーバー: ' + gname(u.gid))}${note(top)}<form method=post class=main>${uid}${rest}</form>${t === 'warn' ? note('警告は処分履歴に残ります。承認は要りません。') : ''}`), FORM));
 });
 app.post('/act/:type', auth(), async (req, res) => {
-  const t = req.params.type, u = req.u, { uid, reason } = req.body;
-  const min = Math.min(+req.body.min || 0, u.role === 'junior' ? 60 : 40320);
-  if (!TYPES[t] || !can(u, t) || !isId(uid) || !reason || (t === 'timeout' && min < 1)) return res.status(400).send(page(u, 'エラー', '', '入力または権限が正しくありません'));
-  try { await exec(u, t, uid, reason.slice(0, 200), min); res.send(page(u, '完了', '', `${TYPES[t]}を実行しました`)); }
-  catch (e) { res.status(500).send(page(u, 'エラー', '', `失敗: ${e.message}`)); }
+  const t = req.params.type, u = req.u, uid = req.body.uid, reason = String(req.body.reason || '').slice(0, 200);
+  const min = t === 'timeout' ? +req.body.min : 0, notify = t === 'warn' || !!req.body.notify;
+  if (!TYPES[t] || !u.gid || !isId(uid) || (t === 'warn' && !reason) || (t === 'timeout' && !DUR.includes(min))) return bad(res, u, '入力が正しくありません');
+  if (!can(u, 'direct') && (t === 'ban' || t === 'kick' || (t === 'timeout' && min > 60))) {
+    db.reqs.unshift({ id: nid(), t: now(), by: u.name, type: t, uid, reason, min, notify, status: '申請中', handler: '', result: '', gid: u.gid }); save();
+    log(u.name, `${TYPES[t]}申請`, uid, reason, u.gid); return res.redirect('/myreqs');
+  }
+  try { await exec(u.name, t, uid, reason, min, notify, u.gid); res.send(done(u, TYPES[t], `${gname(u.gid)}で${pun(t, min)}を実行しました`)); }
+  catch (e) { res.status(500).send(done(u, TYPES[t], `失敗: ${e.message}`)); }
 });
 
-// 申請・承認
-app.get('/reqs', auth(), (req, res) => {
-  const u = req.u, ap = can(u, 'approve');
-  const rows = db.reqs.filter(r => ap || r.by === u.name).slice(0, 100).map(r => tr([esc(r.t), esc(r.by), TYPES[r.type], esc(r.uid), esc(r.reason),
-    r.status === 'pending' && ap ? `<form method=post action=/reqs/${r.id}><button name=a value=ok>承認</button><button name=a value=no>却下</button></form>` : esc(r.status)]));
-  res.send(page(u, '申請一覧', `<fieldset><legend>BAN/KICKの申請</legend><form method=post action=/reqs><select name=type><option value=ban>BAN<option value=kick>KICK</select>
-<input name=uid placeholder=ユーザーID required pattern="\\d{15,22}"><input name=reason placeholder=理由 required maxlength=200><button>申請</button></form></fieldset>
-${table(['日時', '申請者', '種別', 'ユーザーID', '理由', '状況'], rows)}`));
+// ---- 申請 ----
+app.get('/myreqs', auth(), (req, res) => {
+  const rows = db.reqs.filter(r => r.by === req.u.name && r.gid === req.u.gid).slice(0, 100).map(r => tr([r.id, pun(r.type, r.min), esc(r.uid), esc(r.status), esc(r.handler || '-'), esc(r.result || '-'), esc(r.t)]));
+  res.send(page(req.u, '自分の申請', fs_('自分の申請(申請履歴・申請状況)', rows.length ? table(['番号', '予定処罰', '対象のDiscordアカウントID', '状況', '処理した人', '結果', '申請日時'], rows) : empty('申請はまだありません。'))));
 });
-app.post('/reqs', auth(), (req, res) => {
-  const { type, uid, reason } = req.body;
-  if (!['ban', 'kick'].includes(type) || !isId(uid) || !reason) return res.status(400).send(page(req.u, 'エラー', '', '入力が正しくありません'));
-  db.reqs.unshift({ id: db.seq++, t: now(), by: req.u.name, type, uid, reason: reason.slice(0, 200), status: 'pending' });
-  log(req.u, `申請 ${type} ${uid}`); res.redirect('/reqs');
+app.get('/approve', auth('approve'), (req, res) => {
+  const rows = db.reqs.filter(r => r.gid === req.u.gid).slice(0, 100).map(r => tr([r.id, esc(r.by), pun(r.type, r.min), esc(r.uid), esc(r.reason), esc(r.t),
+    r.status === '申請中' ? `<form method=post action=/approve/${r.id}><button name=a value=ok>承認</button> <button name=a value=no>却下</button></form>` : `${esc(r.status)}(${esc(r.handler)})`]));
+  res.send(page(req.u, '申請承認', fs_('申請一覧', rows.length ? table(['番号', '申請者', '予定処罰', '対象ID', '理由', '申請日時', '状況'], rows) : empty('申請はありません。'))));
 });
-app.post('/reqs/:id', auth('approve'), async (req, res) => {
+app.post('/approve/:id', auth('approve'), async (req, res) => {
   const r = db.reqs.find(x => x.id === +req.params.id);
-  if (!r || r.status !== 'pending') return res.redirect('/reqs');
-  if (req.body.a !== 'ok') { r.status = `却下(${req.u.name})`; save(); log(req.u, `却下 申請#${r.id}`); return res.redirect('/reqs'); }
-  try { await exec(req.u, r.type, r.uid, `${r.reason}(申請者:${r.by})`); r.status = `承認(${req.u.name})`; save(); res.redirect('/reqs'); }
-  catch (e) { res.status(500).send(page(req.u, 'エラー', '', `失敗: ${e.message}`)); }
+  if (!r || r.status !== '申請中' || !allowed(req.u).includes(r.gid)) return res.redirect('/approve');
+  r.handler = req.u.name;
+  if (req.body.a === 'ok') {
+    r.status = '承認済';
+    try { await exec(req.u.name, r.type, r.uid, `${r.reason}(申請者:${r.by})`, r.min, r.notify, r.gid); r.result = '実行済'; }
+    catch (e) { r.result = `失敗: ${e.message}`; }
+  } else { r.status = '却下'; r.result = '実行されません'; }
+  save(); log(req.u.name, `申請${r.status}`, r.uid, `#${r.id}`, r.gid); res.redirect('/approve');
 });
 
-// 履歴・ログ
-app.get('/cases', auth(), (req, res) => {
-  const q = String(req.query.uid || '');
-  const rows = db.cases.filter(c => !q || c.uid === q).slice(0, 200).map(c => tr([esc(c.t), TYPES[c.type], esc(c.uid), esc(c.reason), esc(c.by)]));
-  res.send(page(req.u, '処分履歴', `<form><input name=uid placeholder="ユーザーIDで絞り込み" value="${esc(q)}"></form>${table(['日時', '種別', 'ユーザーID', '理由', '担当'], rows)}`));
+// ---- 履歴・ログ ----
+app.get('/history', auth(), (req, res) => {
+  const q = String(req.query.uid || '').trim();
+  const rows = q ? db.cases.filter(c => c.uid === q && c.gid === req.u.gid).map(c => tr([esc(c.t), pun(c.type, c.min), esc(c.reason), esc(c.by)])) : [];
+  res.send(page(req.u, '処分履歴照会', fs_('処分履歴の照会', `<form method=get class=main><label>DiscordユーザーID<input name=uid value="${esc(q)}"></label></form>${note('このシステムから行った処分と警告の記録が出ます。Discordで直接行った処分は含まれません。')}`) +
+    (q ? fs_(`照会結果(${gname(req.u.gid)})`, rows.length ? table(['日時', '処分', '理由', '担当'], rows) : empty('記録はありません。')) : ''), [...BASE, '照会']));
 });
-app.get('/logs', auth('logs'), (req, res) => res.send(page(req.u, '操作ログ', table(['日時', '係員', '内容'], db.logs.slice(0, 200).map(l => tr([esc(l.t), esc(l.who), esc(l.text)]))))));
-
-// DM
-app.get('/dms', auth('dm'), (req, res) => res.send(page(req.u, 'DM受信', table(['日時', '送信者', 'ユーザーID', '内容'], db.dms.slice(0, 100).map(d => tr([esc(d.t), esc(d.name), esc(d.uid), esc(d.text)]))))));
-app.get('/dm', auth('dm'), (req, res) => res.send(page(req.u, 'DM送信', '<form method=post><input name=uid placeholder=ユーザーID required pattern="\\d{15,22}"><textarea name=text rows=5 required maxlength=1500></textarea><button>送信</button></form>')));
-app.post('/dm', auth('dm'), async (req, res) => {
-  if (!isId(req.body.uid) || !req.body.text) return res.status(400).send(page(req.u, 'エラー', '', '入力が正しくありません'));
-  try { await bot.users.send(req.body.uid, req.body.text.slice(0, 1500)); log(req.u, `DM送信 ${req.body.uid}`); res.send(page(req.u, '完了', '', '送信しました')); }
-  catch (e) { res.status(500).send(page(req.u, 'エラー', '', `失敗: ${e.message}`)); }
+app.get('/logs', auth(), (req, res) => {
+  const all = can(req.u, 'logsAll');
+  const rows = db.logs.filter(l => l.gid ? (l.gid === req.u.gid && (all || l.who === req.u.name)) : (l.who === req.u.name || req.u.role === 'owner')).slice(0, 200).map(l => tr([esc(l.t), esc(l.who), esc(l.op), esc(l.target), esc(l.detail)]));
+  res.send(page(req.u, '操作ログ', fs_(all ? '操作ログ(全員の分)' : '操作ログ(自分の分)', table(['日時', '係員', '操作', '対象', '内容'], rows))));
 });
 
-// 管理者間通信
+// ---- DM ----
+app.get('/dms', auth(), (req, res) => {
+  const rows = db.dms.filter(d => visDm(req.u, d)).slice(0, 100).map(d => tr([esc(d.t), esc(d.name), esc(d.text.slice(0, 30)), `<a class=b href=/dms/${d.id}>開く</a>`]));
+  res.send(page(req.u, 'DM受信', fs_('DM受信履歴(新しい順)', table(['受信日時', 'Discordアカウント名', 'メッセージ(一部)', '開く'], rows))));
+});
+app.get('/dms/:id', auth(), (req, res) => {
+  const d = db.dms.find(x => x.id === +req.params.id && visDm(req.u, x));
+  if (!d) return res.redirect('/dms');
+  res.send(page(req.u, 'DM受信', fs_('DM', table(['項目', '内容'], [tr(['日時', esc(d.t)]), tr(['アカウント名', esc(d.name)]), tr(['アカウントID', esc(d.uid)]), tr(['メッセージ', esc(d.text)])])) + '<a class=b href=/dms>一覧へ</a>'));
+});
+app.get('/dm', auth(), (req, res) => res.send(page(req.u, 'DM送信', fs_('DM送信', `<form method=post class=main><label>送信先のDiscordアカウントID<input name=uid required pattern="\\d{15,22}" inputmode=numeric></label><label>メッセージ<textarea name=text rows=7 required maxlength=1500></textarea></label></form>${note('1人あたり1時間に20通まで送れます。相手がDMを拒否していると届きません。選択中のサーバーのメンバーにだけ送れます。')}`), FORM)));
+app.post('/dm', auth(), async (req, res) => {
+  const u = req.u, { uid, text } = req.body;
+  if (!isId(uid) || !text) return bad(res, u, '入力が正しくありません');
+  if (!u.gid || !await bot.guilds.fetch(u.gid).then(g => g.members.fetch(uid)).catch(() => null)) return bad(res, u, `このサーバー(${gname(u.gid)})のメンバーではないため送れません`);
+  db.dmlog = db.dmlog.filter(x => x.ts > Date.now() - 36e5);
+  if (db.dmlog.filter(x => x.uid === uid).length >= 20) return res.status(429).send(done(u, 'DM送信', 'この相手には1時間に20通まで送れます。しばらく待ってください。'));
+  try { await bot.users.send(uid, text.slice(0, 1500)); db.dmlog.push({ uid, ts: Date.now() }); save(); log(u.name, 'DM送信', uid, '', u.gid); res.send(done(u, 'DM送信', '送信しました')); }
+  catch (e) { res.status(500).send(done(u, 'DM送信', `失敗: ${e.message}(相手がDMを拒否している可能性があります)`)); }
+});
+
+// ---- 管理者間通信 ----
 app.get('/inbox', auth(), (req, res) => {
-  const u = req.u, mine = db.msgs.filter(m => m.to === u.name);
-  const body = `<fieldset><legend>送信</legend><form method=post><select name=to>${db.users.filter(x => x.name !== u.name).map(x => `<option>${esc(x.name)}`).join('')}</select>
-<textarea name=text rows=4 required maxlength=1500></textarea><button>送信</button></form></fieldset>${table(['日時', '差出人', '内容'], mine.slice(0, 50).map(m => tr([esc(m.t), esc(m.from), esc(m.text)])))}`;
-  mine.forEach(m => m.read = true); save();
-  res.send(page(u, '管理者間通信', body));
+  const u = req.u, tab = ['in', 'out', 'new'].includes(req.query.tab) ? req.query.tab : 'in';
+  const tabs = `<div class=tb>${[['in', '受信箱'], ['out', '送信済み'], ['new', '新規作成']].map(([k, v]) => `<a class="b${tab === k ? ' cur' : ''}" href="/inbox?tab=${k}">${v}</a>`).join('')}</div>`;
+  if (tab === 'new') return res.send(page(u, '管理者間通信', tabs + fs_('新規作成', `<form method=post class=main><label>宛先<select name=to><option value="*">このサーバーの全員(一斉送信)${db.users.filter(x => x.id !== u.id && allowed(x).includes(u.gid)).map(x => `<option>${esc(x.name)}`).join('')}</select></label><label>件名<input name=subject maxlength=100></label><label>本文<textarea name=text rows=6 required maxlength=1500></textarea></label></form>`), [...BASE, '発信']));
+  const seen = new Set();
+  const rows = db.msgs.filter(m => m.gid === u.gid).filter(m => tab === 'in' ? m.to === u.name : (m.from === u.name && (!m.grp || (!seen.has(m.grp) && seen.add(m.grp))))).slice(0, 100)
+    .map(m => tr([esc(m.t), esc(tab === 'in' ? m.from : m.grp ? `全員(${db.msgs.filter(x => x.grp === m.grp).length}人)` : m.to), esc(m.subject), m.read ? '既読' : '未読', `<a class=b href=/inbox/${m.id}>開く</a>`]));
+  res.send(page(u, '管理者間通信', tabs + fs_(tab === 'in' ? '受信箱' : '送信済み', table(['日時', tab === 'in' ? '差出人' : '宛先', '件名', '状態', '開く'], rows)), [...BASE, '発信'], { 発信: "location='/inbox?tab=new'" }));
 });
-app.post('/inbox', auth(), (req, res) => {
-  if (!db.users.some(x => x.name === req.body.to) || !req.body.text) return res.status(400).send(page(req.u, 'エラー', '', '入力が正しくありません'));
-  db.msgs.unshift({ t: now(), from: req.u.name, to: req.body.to, text: req.body.text.slice(0, 1500), read: false }); save();
+app.get('/inbox/:id', auth(), (req, res) => {
+  const u = req.u, m = db.msgs.find(x => x.id === +req.params.id && (x.to === u.name || x.from === u.name) && x.gid === u.gid);
+  if (!m) return res.redirect('/inbox');
+  if (m.to === u.name && !m.read) { m.read = true; save(); }
+  res.send(page(u, '管理者間通信', fs_('メッセージ', table(['項目', '内容'], [tr(['日時', esc(m.t)]), tr(['差出人', esc(m.from)]), tr(['宛先', esc(m.grp && m.from === u.name ? '全員(一斉送信)' : m.to)]), tr(['件名', esc(m.subject)]), tr(['本文', esc(m.text)])])) + '<a class=b href=/inbox>受信箱へ</a>' + (can(u, 'delMsg') ? ` <form method=post action=/inbox/${m.id}/delete style="display:inline" onsubmit="return confirm('このメッセージを削除しますか?')"><button>削除</button></form>` : '')));
+});
+app.post('/inbox/:id/delete', auth('delMsg'), (req, res) => {
+  const u = req.u, m = db.msgs.find(x => x.id === +req.params.id && (x.to === u.name || x.from === u.name));
+  if (!m) return res.redirect('/inbox');
+  const gone = m.grp && m.from === u.name ? db.msgs.filter(x => x.grp === m.grp) : [m];
+  db.msgs = db.msgs.filter(x => !gone.includes(x)); save();
+  log(u.name, 'メッセージ削除', '', `${m.subject}(${gone.length}件)`, m.gid);
   res.redirect('/inbox');
 });
-
-// アカウント管理(最高管理者のみ)
-app.get('/accounts', auth('accounts'), (req, res) => res.send(page(req.u, 'アカウント管理', `<fieldset><legend>作成 / 更新(既存の名前なら権限・パスワードを更新)</legend><form method=post>
-<input name=name placeholder="アカウント名(英数字3〜20)" required><input name=pass type=password placeholder="パスワード(8文字以上。更新時は空欄で変更なし)">
-<select name=role>${Object.entries(ROLES).map(([k, v]) => `<option value=${k}>${v}`).join('')}</select><button>保存</button></form></fieldset>
-${table(['アカウント', '権限'], db.users.map(x => tr([esc(x.name), ROLES[x.role]])))}`)));
-app.post('/accounts', auth('accounts'), (req, res) => {
-  const { name, pass, role } = req.body, ex = db.users.find(x => x.name === name);
-  if (!/^[\w-]{3,20}$/.test(name || '') || !ROLES[role] || (pass && pass.length < 8) || (!ex && !pass) || (ex && ex.name === req.u.name && role !== 'owner'))
-    return res.status(400).send(page(req.u, 'エラー', '', '入力が正しくありません(自分自身の権限は下げられません)'));
-  if (ex) { ex.role = role; if (pass) ex.hash = bcrypt.hashSync(pass, 10); }
-  else db.users.push({ name, hash: bcrypt.hashSync(pass, 10), role });
-  save(); log(req.u, `アカウント更新 ${name}(${ROLES[role]})`); res.redirect('/accounts');
+app.post('/inbox', auth(), (req, res) => {
+  const { to, subject, text } = req.body;
+  const bulk = to === '*', pool = db.users.filter(x => x.id !== req.u.id && allowed(x).includes(req.u.gid)), names = (bulk ? pool : pool.filter(x => x.name === to)).map(x => x.name);
+  if (!names.length || !text) return bad(res, req.u, '入力が正しくありません(宛先がいません)');
+  const grp = bulk ? nid() : undefined, subj = String(subject || '(件名なし)').slice(0, 100), t = now();
+  names.forEach(n => db.msgs.unshift({ id: nid(), t, from: req.u.name, to: n, subject: subj, text: text.slice(0, 1500), read: false, grp, gid: req.u.gid }));
+  save(); if (bulk) log(req.u.name, '一斉送信', '', subj, req.u.gid);
+  res.redirect('/inbox?tab=out');
 });
 
-// パスワード変更
-app.get('/password', auth(), (req, res) => res.send(page(req.u, 'パスワード変更', '<form method=post><input name=old type=password placeholder=現在のパスワード required><input name=pass type=password placeholder="新しいパスワード(8文字以上)" required><button>変更</button></form>')));
+// ---- 全メッセージ管理(最高管理者のみ・他の人のメッセージも削除可) ----
+app.get('/allmsgs', auth('delMsg'), (req, res) => {
+  const seen = new Set();
+  const rows = db.msgs.filter(m => m.gid === req.u.gid).filter(m => !m.grp || (!seen.has(m.grp) && seen.add(m.grp))).slice(0, 200).map(m => tr([esc(m.t), esc(m.from),
+    m.grp ? `全員(${db.msgs.filter(x => x.grp === m.grp).length}人)` : esc(m.to), esc(m.subject), esc(m.text.slice(0, 40)),
+    `<form method=post action=/allmsgs/${m.id}/delete onsubmit="return confirm('このメッセージを削除しますか?')"><button>削除</button></form>`]));
+  res.send(page(req.u, '全メッセージ管理', fs_(`管理者間通信の全メッセージ(${gname(req.u.gid)})`, rows.length ? table(['日時', '差出人', '宛先', '件名', '本文(一部)', '操作'], rows) : empty('メッセージはありません。'))));
+});
+app.post('/allmsgs/:id/delete', auth('delMsg'), (req, res) => {
+  const m = db.msgs.find(x => x.id === +req.params.id);
+  if (m) {
+    const gone = m.grp ? db.msgs.filter(x => x.grp === m.grp) : [m];
+    db.msgs = db.msgs.filter(x => !gone.includes(x)); save();
+    log(req.u.name, 'メッセージ削除(全体)', m.from, `${m.subject}(${gone.length}件)`, m.gid);
+  }
+  res.redirect('/allmsgs');
+});
+
+// ---- アカウント管理(最高管理者のみ) ----
+app.get('/accounts', auth('accounts'), (req, res) => {
+  const rows = db.users.map(x => tr([esc(x.name), ROLES[x.role], x.role === 'owner' ? '全て' : esc(allowed(x).map(gname).join(', ') || 'なし'), x.id === req.u.id ? '(自分)' : `<form method=post action=/accounts/delete onsubmit="return confirm('このアカウントを削除しますか?')"><input type=hidden name=id value=${x.id}><button>削除</button></form>`]));
+  res.send(page(req.u, 'アカウント管理', fs_('追加 / 更新(既存の名前なら権限・パスワードを更新)', `<form method=post><label>アカウント名(英数字3〜20)<input name=name required></label><label>パスワード(8文字以上。更新時は空欄で変更なし)<input name=pass type=password autocomplete=new-password></label><label>権限<select name=role>${Object.entries(ROLES).map(([k, v]) => `<option value=${k}>${v}`).join('')}</select></label><div>操作できるサーバー(最高管理者は全サーバー): ${GIDS.map(g => `<label><input type=checkbox name=g value="${g}"> ${esc(gname(g))}</label> `).join('')}</div><br><button>保存</button></form>`) + fs_('アカウント一覧', table(['アカウント', '権限', '操作できるサーバー', '操作'], rows))));
+});
+app.post('/accounts', auth('accounts'), (req, res) => {
+  const { name, pass, role } = req.body, ex = db.users.find(x => x.name === name);
+  const gs = [].concat(req.body.g || []).filter(g => GIDS.includes(g));
+  if (!/^[\w-]{3,20}$/.test(name || '') || !ROLES[role] || (pass && pass.length < 8) || (!ex && !pass) || (ex && ex.id === req.u.id && role !== 'owner') || (role !== 'owner' && !gs.length))
+    return bad(res, req.u, '入力が正しくありません(自分自身の権限は下げられません / 最高管理者以外は操作できるサーバーを1つ以上選んでください)');
+  if (ex) { ex.role = role; ex.guilds = gs; if (pass) ex.hash = bcrypt.hashSync(pass, 10); }
+  else db.users.push({ id: nid(), name, hash: bcrypt.hashSync(pass, 10), role, guilds: gs });
+  save(); log(req.u.name, ex ? 'アカウント更新' : 'アカウント追加', name, ROLES[role]); res.redirect('/accounts');
+});
+app.post('/accounts/delete', auth('accounts'), (req, res) => {
+  const t = db.users.find(x => x.id === +req.body.id);
+  if (!t || t.id === req.u.id) return bad(res, req.u, '削除できません(自分自身は削除できません)');
+  db.users = db.users.filter(x => x.id !== t.id); save();
+  log(req.u.name, 'アカウント削除', t.name); res.redirect('/accounts');
+});
+
+// ---- パスワード変更 ----
+app.get('/password', auth(), (req, res) => res.send(page(req.u, 'パスワード変更', fs_('パスワード変更', '<form method=post><label>現在のパスワード<input name=old type=password autocomplete=current-password required></label><label>新しいパスワード(8文字以上)<input name=pass type=password autocomplete=new-password required></label><button>変更</button></form>'))));
 app.post('/password', auth(), (req, res) => {
-  if (!bcrypt.compareSync(req.body.old || '', req.u.hash) || (req.body.pass || '').length < 8) return res.status(400).send(page(req.u, 'エラー', '', '現在のパスワードが違うか、新しいパスワードが短すぎます'));
-  req.u.hash = bcrypt.hashSync(req.body.pass, 10); save(); res.send(page(req.u, '完了', '', '変更しました'));
+  if (!bcrypt.compareSync(req.body.old || '', req.u.hash) || (req.body.pass || '').length < 8) return bad(res, req.u, '現在のパスワードが違うか、新しいパスワードが短すぎます');
+  db.users.find(x => x.id === req.u.id).hash = bcrypt.hashSync(req.body.pass, 10); save(); log(req.u.name, 'パスワード変更'); res.send(done(req.u, 'パスワード変更', '変更しました'));
 });
 
 app.listen(PORT, '0.0.0.0', () => console.log(`管理画面: http://localhost:${PORT}`));
