@@ -1,6 +1,6 @@
 require('dotenv').config();
 const fs = require('fs'), express = require('express'), session = require('express-session'), bcrypt = require('bcryptjs');
-const { Client, GatewayIntentBits: G, Partials, Events } = require('discord.js');
+const { Client, GatewayIntentBits: G, Partials, Events, EmbedBuilder } = require('discord.js');
 const { DISCORD_TOKEN, GUILD_ID, SESSION_SECRET, OWNER_USER = 'owner', OWNER_PASS, PORT = 3000 } = process.env;
 const GIDS = (process.env.GUILD_IDS || GUILD_ID || '').split(',').map(x => x.trim()).filter(Boolean);
 if (!GIDS.length) { console.error('GUILD_IDS(サーバーID。複数ならカンマ区切り)を設定してください'); process.exit(1); }
@@ -9,7 +9,7 @@ if (!SESSION_SECRET || !OWNER_PASS) { console.error('SESSION_SECRET と OWNER_PA
 // ---- 保存(JSONファイル) ----
 const FILE = 'data/db.json';
 fs.mkdirSync('data', { recursive: true });
-const db = Object.assign({ users: [], msgs: [], dms: [], logs: [], cases: [], reqs: [], dmlog: [], seq: 1 },
+const db = Object.assign({ users: [], msgs: [], dms: [], logs: [], cases: [], reqs: [], dmlog: [], emerg: {}, seq: 1 },
   fs.existsSync(FILE) ? JSON.parse(fs.readFileSync(FILE, 'utf8')) : {});
 const save = () => fs.writeFileSync(FILE, JSON.stringify(db));
 const nid = () => db.seq++;
@@ -22,7 +22,7 @@ db.dms.forEach(d => { d.gids ??= [GIDS[0]]; }); save();
 // ---- 権限(ここを書き換えれば調整できます) ----
 // direct: BAN/KICK/60分超のタイムアウトを承認なしで実行 / approve: 申請の承認 / logsAll: 全員の操作ログ / accounts: アカウント管理 / delMsg: 管理者間通信のメッセージ削除
 const ROLES = { owner: '最高管理者', admin: '管理者', junior: '新任管理者' };
-const CAN = { owner: ['direct', 'approve', 'logsAll', 'accounts', 'delMsg'], admin: ['direct', 'approve', 'logsAll'], junior: [] };
+const CAN = { owner: ['direct', 'approve', 'logsAll', 'accounts', 'delMsg', 'release'], admin: ['direct', 'approve', 'logsAll'], junior: [] };
 const can = (u, p) => CAN[u.role].includes(p);
 const allowed = u => u.role === 'owner' ? GIDS : GIDS.filter(g => (u.guilds || []).includes(g));
 const gname = id => bot.guilds.cache.get(id)?.name || id;
@@ -34,7 +34,7 @@ const isId = s => /^\d{15,22}$/.test(s || '');
 const pun = (t, m) => TYPES[t] + (t === 'timeout' ? `(${fmtMin(m)})` : '');
 
 // ---- Discord ----
-const bot = new Client({ intents: [G.Guilds, G.GuildMembers, G.DirectMessages], partials: [Partials.Channel, Partials.Message] });
+const bot = new Client({ intents: [G.Guilds, G.GuildMembers, G.DirectMessages, G.GuildVoiceStates], partials: [Partials.Channel, Partials.Message] });
 bot.on(Events.MessageCreate, async m => {
   if (m.guild || m.author.bot) return;
   const gids = [];
@@ -145,6 +145,7 @@ app.get('/', auth(), (req, res) => {
     Gp('処分業務(BAN・KICK・タイムアウト)', [T('/act/ban', 'BAN', 'ユーザー追放'), T('/act/kick', 'KICK', 'ユーザー退出'), T('/act/timeout', 'タイムアウト', '発言停止'), T('/act/warn', '警告', '警告記録'), T('/act/unban', 'BAN解除', '追放を解除'), T('/act/untimeout', 'タイムアウト解除', '発言停止を解除')]) +
     Gp('申請・承認', [T('/approve', '申請承認', '承認待ち', can(u, 'approve')), T('/myreqs', '自分の申請', '申請状況'), T('/logs', '操作ログ', '実行履歴'), T('/history', '処分履歴照会', 'アカウント別')]) +
     Gp('通信業務', [T('/dms', 'DM受信', 'BOT宛DM'), T('/dm', 'DM送信', 'ユーザー宛DM'), T('/inbox', '管理者間通信', 'サイト内・メール'), T('/allmsgs', '全メッセージ管理', 'メッセージ削除', can(u, 'delMsg'))]) +
+    Gp('サーバー管理', [T('/user', 'ユーザー情報', 'ID・ロール・警告'), T('/vc', 'VC管理', '参加者・切断・ミュート'), T('/invites', '招待リンク', '確認・破棄', can(u, 'direct')), T('/embed', '埋め込み投稿', 'Botから投稿', can(u, 'direct')), T('/emerg', '緊急対応', '封鎖・低速・ゲート', can(u, 'release'))]) +
     Gp('設定業務', [T('/accounts', 'アカウント管理', '追加・削除', can(u, 'accounts')), T('/password', 'パスワード変更', '自分のパスワード')]), ['更新', '終了']));
 });
 
@@ -202,15 +203,17 @@ app.get('/history', auth(), (req, res) => {
     (q ? fs_(`照会結果(${gname(req.u.gid)})`, rows.length ? table(['日時', '処分', '理由', '担当'], rows) : empty('記録はありません。')) : ''), [...BASE, '照会']));
 });
 app.get('/logs', auth(), (req, res) => {
-  const all = can(req.u, 'logsAll');
-  const rows = db.logs.filter(l => l.gid ? (l.gid === req.u.gid && (all || l.who === req.u.name)) : (l.who === req.u.name || req.u.role === 'owner')).slice(0, 200).map(l => tr([esc(l.t), esc(l.who), esc(l.op), esc(l.target), esc(l.detail)]));
-  res.send(page(req.u, '操作ログ', fs_(all ? '操作ログ(全員の分)' : '操作ログ(自分の分)', table(['日時', '係員', '操作', '対象', '内容'], rows))));
+  const u = req.u, all = can(u, 'logsAll'), own = u.role === 'owner', who = own ? String(req.query.who || '') : '';
+  const src = who ? db.logs.filter(l => l.who === who) : db.logs.filter(l => l.gid ? (l.gid === u.gid && (all || l.who === u.name)) : (l.who === u.name || own));
+  const rows = src.slice(0, 300).map(l => tr([esc(l.t), esc(l.who), esc(l.op), esc(l.target), esc(l.detail), l.gid ? esc(gname(l.gid)) : '-']));
+  const sel = own ? `<form method=get><label>アカウントで絞り込み(全サーバーの記録)<select name=who onchange="this.form.submit()"><option value="">全員(選択中のサーバー)${db.users.map(x => `<option${x.name === who ? ' selected' : ''}>${esc(x.name)}`).join('')}</select></label></form>` : '';
+  res.send(page(u, '操作ログ', fs_(who ? `操作ログ(${who})` : all ? '操作ログ(全員の分)' : '操作ログ(自分の分)', sel + table(['日時', '係員', '操作', '対象', '内容', 'サーバー'], rows))));
 });
 
 // ---- DM ----
 app.get('/dms', auth(), (req, res) => {
-  const rows = db.dms.filter(d => visDm(req.u, d)).slice(0, 100).map(d => tr([esc(d.t), esc(d.name), esc(d.text.slice(0, 30)), `<a class=b href=/dms/${d.id}>開く</a>`]));
-  res.send(page(req.u, 'DM受信', fs_('DM受信履歴(新しい順)', table(['受信日時', 'Discordアカウント名', 'メッセージ(一部)', '開く'], rows))));
+  const rows = db.dms.filter(d => visDm(req.u, d)).slice(0, 100).map(d => tr([esc(d.t), esc(d.name), esc(d.uid), esc(d.text.slice(0, 30)), `<a class=b href=/dms/${d.id}>開く</a>`]));
+  res.send(page(req.u, 'DM受信', fs_('DM受信履歴(新しい順)', table(['受信日時', 'Discordアカウント名', 'アカウントID', 'メッセージ(一部)', '開く'], rows))));
 });
 app.get('/dms/:id', auth(), (req, res) => {
   const d = db.dms.find(x => x.id === +req.params.id && visDm(req.u, x));
@@ -261,6 +264,131 @@ app.post('/inbox', auth(), (req, res) => {
   save(); if (bulk) log(req.u.name, '一斉送信', '', subj, req.u.gid);
   res.redirect('/inbox?tab=out');
 });
+
+// ---- サーバー管理(ユーザー情報・ロール・VC・招待・緊急対応・埋め込み) ----
+const run = fn => (req, res) => Promise.resolve(fn(req, res)).catch(e => res.status(500).send(done(req.u, 'エラー', `失敗: ${e.message}`)));
+const fmtD = d => d ? new Date(d).toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(0, 16) : '-';
+const G_ = async u => { if (!u.gid) throw new Error('サーバーが選択されていません'); return bot.guilds.fetch(u.gid); };
+const chans = (g, types = [0, 5]) => g.channels.cache.filter(c => types.includes(c.type));
+const btn = (action, label, ask, extra = '') => `<form method=post action=${action} style="display:inline" onsubmit="return confirm('${ask}')">${extra}<button>${label}</button></form>`;
+
+// ユーザー情報(ID・参加日・ロール・警告回数・ステータス)+ロール付け外し
+app.get('/user', auth(), run(async (req, res) => {
+  const u = req.u, q = String(req.query.q || '').trim();
+  let out = '';
+  if (q) {
+    const g = await G_(u);
+    const ms = isId(q) ? [await g.members.fetch(q).catch(() => null)].filter(Boolean) : [...(await g.members.search({ query: q, limit: 10 })).values()];
+    const roleOpts = [...g.roles.cache.values()].filter(r => r.id !== g.id && !r.managed && r.editable && (u.role === 'owner' || !r.permissions.has('Administrator'))).sort((a, b) => b.position - a.position).map(r => `<option value=${r.id}>${esc(r.name)}`).join('');
+    const hist = id => { const c = db.cases.filter(x => x.gid === u.gid && x.uid === id), n = t => c.filter(x => x.type === t).length; return { warn: n('warn'), txt: `警告${n('warn')} / タイムアウト${n('timeout')} / KICK${n('kick')} / BAN${n('ban')}` }; };
+    for (const m of ms) {
+      const h = hist(m.id), to = m.communicationDisabledUntilTimestamp > Date.now() ? `タイムアウト中(〜${fmtD(m.communicationDisabledUntilTimestamp)})` : '通常';
+      out += fs_(m.displayName, table(['項目', '内容'], [tr(['ユーザーID', esc(m.id)]), tr(['アカウント名', esc(m.user.tag)]), tr(['サーバー参加日', fmtD(m.joinedAt)]), tr(['アカウント作成日', fmtD(m.user.createdAt)]),
+        tr(['所持ロール', esc([...m.roles.cache.values()].filter(r => r.id !== g.id).map(r => r.name).join(', ') || 'なし')]), tr(['過去の警告回数', `${h.warn} 回`]), tr(['処分履歴(このシステム)', h.txt]),
+        tr(['現在のステータス', to + (m.voice?.channel ? ` / VC参加中(${esc(m.voice.channel.name)})` : '')])]) +
+        (can(u, 'direct') ? `<form method=post action=/role><input type=hidden name=uid value=${m.id}><label>ロール<select name=rid>${roleOpts}</select></label><button name=a value=add>付与</button> <button name=a value=remove>解除</button></form>` : ''));
+    }
+    if (!ms.length && isId(q)) {
+      const ban = await g.bans.fetch({ user: q, force: true }).catch(() => null), h = hist(q);
+      out += fs_('サーバーにいないユーザー', table(['項目', '内容'], [tr(['ユーザーID', esc(q)]), tr(['現在のステータス', ban ? `BAN中(理由: ${esc(ban.reason || 'なし')})` : 'サーバーにいません(BANなし)']), tr(['過去の警告回数', `${h.warn} 回`]), tr(['処分履歴(このシステム)', h.txt])]));
+    } else if (!ms.length) out += note('見つかりませんでした。');
+  }
+  res.send(page(u, 'ユーザー情報', fs_(`ユーザー検索(${gname(u.gid)})`, `<form method=get class=main><label>ユーザーIDまたは名前<input name=q value="${esc(q)}"></label></form>`) + out, [...BASE, '照会']));
+}));
+app.post('/role', auth('direct'), run(async (req, res) => {
+  const u = req.u, { uid, rid, a } = req.body;
+  if (!isId(uid) || !isId(rid) || !['add', 'remove'].includes(a)) return bad(res, u, '入力が正しくありません');
+  const g = await G_(u), role = g.roles.cache.get(rid), m = await g.members.fetch(uid);
+  if (!role || role.managed || role.id === g.id) return bad(res, u, 'このロールは操作できません');
+  if (u.role !== 'owner' && role.permissions.has('Administrator')) return bad(res, u, '管理者権限を持つロールは最高管理者だけが操作できます');
+  if (a === 'add') await m.roles.add(role, `by ${u.name}`); else await m.roles.remove(role, `by ${u.name}`);
+  log(u.name, a === 'add' ? 'ロール付与' : 'ロール解除', uid, role.name, u.gid);
+  res.redirect('/user?q=' + uid);
+}));
+
+// 埋め込みメッセージ投稿
+app.get('/embed', auth('direct'), run(async (req, res) => {
+  const u = req.u, g = await G_(u); await g.channels.fetch();
+  const opts = [...chans(g).values()].sort((a, b) => a.rawPosition - b.rawPosition).map(c => `<option value=${c.id}>#${esc(c.name)}`).join('');
+  res.send(page(u, '埋め込み投稿', fs_(`埋め込み投稿(${gname(u.gid)})`, `<form method=post class=main><label>チャンネル<select name=cid>${opts}</select></label><label>タイトル<input name=title maxlength=256 required></label><label>本文<textarea name=text rows=6 maxlength=4000 required></textarea></label><label>色<input type=color name=color value="#2a45b5"></label></form>`), FORM));
+}));
+app.post('/embed', auth('direct'), run(async (req, res) => {
+  const u = req.u, { cid, title, text, color } = req.body, g = await G_(u), c = g.channels.cache.get(cid) || await g.channels.fetch(cid).catch(() => null);
+  if (!c || ![0, 5].includes(c.type) || !title || !text || !/^#[0-9a-f]{6}$/i.test(color || '')) return bad(res, u, '入力が正しくありません');
+  await c.send({ embeds: [new EmbedBuilder().setTitle(title.slice(0, 256)).setDescription(text.slice(0, 4000)).setColor(parseInt(color.slice(1), 16))] });
+  log(u.name, '埋め込み投稿', c.id, title, u.gid); res.send(done(u, '埋め込み投稿', `#${c.name} に投稿しました`));
+}));
+
+// VC管理(10秒ごとに自動更新)
+app.get('/vc', auth(), run(async (req, res) => {
+  const u = req.u, g = await G_(u);
+  const rows = [...g.voiceStates.cache.values()].filter(v => v.channel).sort((a, b) => a.channel.rawPosition - b.channel.rawPosition).map(v => tr([esc(v.channel.name), esc(v.member?.displayName || v.id), esc(v.id), v.serverMute ? 'サーバーミュート中' : v.selfMute ? '自分でミュート' : '-',
+    `<form method=post action=/vc/act style="display:inline"><input type=hidden name=uid value=${v.id}><button name=a value=disconnect>切断</button> <button name=a value=mute>ミュート</button> <button name=a value=unmute>ミュート解除</button></form>`]));
+  res.send(page(u, 'VC管理', fs_(`ボイスチャンネルの参加者(${gname(u.gid)} / 10秒ごとに自動更新)`, rows.length ? table(['VC', '名前', 'ユーザーID', '状態', '操作'], rows) : empty('現在VCに参加している人はいません。')) + '<script>setTimeout(function(){location.reload()},10000)</script>'));
+}));
+app.post('/vc/act', auth(), run(async (req, res) => {
+  const u = req.u, { uid, a } = req.body;
+  if (!isId(uid) || !['disconnect', 'mute', 'unmute'].includes(a)) return bad(res, u, '入力が正しくありません');
+  const g = await G_(u), m = await g.members.fetch(uid);
+  if (!m.voice.channel) return bad(res, u, 'この人は今VCにいません');
+  if (a === 'disconnect') await m.voice.disconnect(`by ${u.name}`); else await m.voice.setMute(a === 'mute', `by ${u.name}`);
+  log(u.name, { disconnect: 'VC切断', mute: 'VCミュート', unmute: 'VCミュート解除' }[a], uid, '', u.gid); res.redirect('/vc');
+}));
+
+// 招待リンクの確認と破棄
+app.get('/invites', auth('direct'), run(async (req, res) => {
+  const u = req.u, g = await G_(u), inv = [...(await g.invites.fetch()).values()].sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+  const rows = inv.map(i => tr([esc(i.code), esc(i.inviter?.tag || '不明'), esc(i.inviterId || '-'), `${i.uses ?? 0} / ${i.maxUses || '∞'}`, fmtD(i.createdAt), i.expiresAt ? fmtD(i.expiresAt) : '無期限', esc(i.channel?.name || '-'),
+    `<form method=post action=/invites/delete onsubmit="return confirm('この招待リンクを破棄しますか?')"><input type=hidden name=code value="${esc(i.code)}"><button>破棄</button></form>`]));
+  res.send(page(u, '招待リンク', fs_(`有効な招待リンク(${gname(u.gid)})`, rows.length ? table(['コード', '作成者', '作成者ID', '使用回数', '作成日', '有効期限', 'チャンネル', '操作'], rows) : empty('有効な招待リンクはありません。'))));
+}));
+app.post('/invites/delete', auth('direct'), run(async (req, res) => {
+  const u = req.u, code = String(req.body.code || '');
+  if (!/^[\w-]{2,32}$/.test(code)) return bad(res, u, '入力が正しくありません');
+  await (await G_(u)).invites.delete(code, `by ${u.name}`);
+  log(u.name, '招待リンク破棄', code, '', u.gid); res.redirect('/invites');
+}));
+
+// 緊急対応(発動も解除も最高管理者のみ)
+app.get('/emerg', auth('release'), run(async (req, res) => {
+  const u = req.u, g = await G_(u), st = db.emerg[u.gid] || {}, rel = can(u, 'release'), gate = g.features.includes('INVITES_DISABLED');
+  const on = s => s ? `<b>発動中</b>(${esc(s.by)} / ${esc(s.at)})` : '未発動';
+  const relBtn = (action, label) => rel ? btn(action, label, `${label}しますか?`) : '<small>解除は最高管理者のみ</small>';
+  const secs = [5, 10, 30, 60, 300, 900, 3600].map(x => `<option value=${x}>${x >= 60 ? x / 60 + '分' : x + '秒'}`).join('');
+  res.send(page(u, '緊急対応', note(`対象サーバー: ${gname(u.gid)}`) +
+    fs_('緊急封鎖(全テキストチャンネルの書き込み停止)', `<p>状態: ${on(st.lock)}</p>${btn('/emerg/lock', '緊急封鎖する', '全テキストチャンネルの書き込みを停止します。よろしいですか?')} ${relBtn('/emerg/unlock', '封鎖を解除')}`) +
+    fs_('低速モード(全テキストチャンネル)', `<p>状態: ${st.slow ? `<b>発動中</b>(${st.slow.sec}秒 / ${esc(st.slow.by)} / ${esc(st.slow.at)})` : '未発動'}</p><form method=post action=/emerg/slow onsubmit="return confirm('全チャンネルに低速モードを適用しますか?')"><label>書き込み間隔<select name=sec>${secs}</select></label><button>適用</button></form> ${relBtn('/emerg/unslow', '低速モードを解除')}`) +
+    fs_('ゲート封鎖(新規参加のブロック)', `<p>状態: ${gate ? '<b>封鎖中</b>' : '未封鎖'}${st.gate ? `(${esc(st.gate.by)} / ${esc(st.gate.at)})` : ''}</p>${btn('/emerg/gate', 'ゲートを封鎖する', '招待リンクからの新規参加を止めます。よろしいですか?')} ${relBtn('/emerg/ungate', 'ゲートを解除')}`)));
+}));
+app.post('/emerg/:act', auth('release'), run(async (req, res) => {
+  const u = req.u, a = req.params.act, g = await G_(u), st = db.emerg[u.gid] ??= {};
+  if (['unlock', 'unslow', 'ungate'].includes(a) && !can(u, 'release')) { log(u.name, '権限なしの操作', '', req.path, u.gid); return res.status(403).send(done(u, '権限なし', '解除は最高管理者だけが行えます。')); }
+  let msg, fail = 0;
+  if (a === 'lock') {
+    if (st.lock) throw new Error('すでに封鎖中です');
+    await g.channels.fetch(); const prev = {};
+    for (const c of chans(g).values()) { const ow = c.permissionOverwrites.cache.get(g.id); prev[c.id] = ow?.deny.has('SendMessages') ? false : ow?.allow.has('SendMessages') ? true : null; await c.permissionOverwrites.edit(g.id, { SendMessages: false }, { reason: `緊急封鎖 by ${u.name}` }).catch(() => fail++); }
+    st.lock = { at: now(), by: u.name, prev }; msg = `緊急封鎖しました${fail ? `(${fail}件のチャンネルは失敗)` : ''}`;
+  } else if (a === 'unlock') {
+    if (!st.lock) throw new Error('封鎖していません');
+    for (const [id, v] of Object.entries(st.lock.prev)) { const c = g.channels.cache.get(id); if (c) await c.permissionOverwrites.edit(g.id, { SendMessages: v }).catch(() => fail++); }
+    delete st.lock; msg = `封鎖を解除しました${fail ? `(${fail}件のチャンネルは失敗)` : ''}`;
+  } else if (a === 'slow') {
+    const sec = +req.body.sec;
+    if (![5, 10, 30, 60, 300, 900, 3600].includes(sec)) return bad(res, u, '入力が正しくありません');
+    if (st.slow) throw new Error('すでに適用中です。先に解除してください');
+    await g.channels.fetch(); const prev = {};
+    for (const c of chans(g, [0]).values()) { prev[c.id] = c.rateLimitPerUser || 0; await c.setRateLimitPerUser(sec, `緊急対応 by ${u.name}`).catch(() => fail++); }
+    st.slow = { at: now(), by: u.name, sec, prev }; msg = `低速モードを適用しました(${sec}秒)${fail ? `(${fail}件のチャンネルは失敗)` : ''}`;
+  } else if (a === 'unslow') {
+    if (!st.slow) throw new Error('低速モードを適用していません');
+    for (const [id, v] of Object.entries(st.slow.prev)) { const c = g.channels.cache.get(id); if (c) await c.setRateLimitPerUser(v).catch(() => fail++); }
+    delete st.slow; msg = `低速モードを解除しました${fail ? `(${fail}件のチャンネルは失敗)` : ''}`;
+  } else if (a === 'gate') { await g.disableInvites(true); st.gate = { at: now(), by: u.name }; msg = 'ゲートを封鎖しました(招待リンクからの新規参加を停止)'; }
+  else if (a === 'ungate') { await g.disableInvites(false); delete st.gate; msg = 'ゲートを解除しました'; }
+  else return res.redirect('/emerg');
+  save(); log(u.name, `緊急対応:${a}`, '', msg, u.gid); res.send(done(u, '緊急対応', msg));
+}));
 
 // ---- 全メッセージ管理(最高管理者のみ・他の人のメッセージも削除可) ----
 app.get('/allmsgs', auth('delMsg'), (req, res) => {
