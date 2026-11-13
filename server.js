@@ -27,7 +27,7 @@ const can = (u, p) => CAN[u.role].includes(p);
 const allowed = u => u.role === 'owner' ? GIDS : GIDS.filter(g => (u.guilds || []).includes(g));
 const gname = id => bot.guilds.cache.get(id)?.name || id;
 const visDm = (u, d) => d.gids.includes(u.gid) || (!d.gids.length && u.role === 'owner');
-const TYPES = { ban: 'BAN', kick: 'KICK', timeout: 'タイムアウト', warn: '警告' };
+const TYPES = { ban: 'BAN', kick: 'KICK', timeout: 'タイムアウト', warn: '警告', unban: 'BAN解除', untimeout: 'タイムアウト解除' };
 const DUR = [5, 10, 30, 60, 180, 360, 720, 1440, 4320, 10080, 40320];
 const fmtMin = m => m % 1440 === 0 ? `${m / 1440}日` : m % 60 === 0 ? `${m / 60}時間` : `${m}分`;
 const isId = s => /^\d{15,22}$/.test(s || '');
@@ -54,9 +54,10 @@ async function exec(by, type, uid, reason, min, notify, gid) {
   if (type !== 'warn') {
     const g = await bot.guilds.fetch(gid);
     if (type === 'ban') await g.members.ban(uid, { reason });
+    else if (type === 'unban') await g.bans.remove(uid, reason);
     else {
       const m = await g.members.fetch(uid);
-      if (type === 'kick') await m.kick(reason); else await m.timeout(min * 60000, reason);
+      if (type === 'kick') await m.kick(reason); else await m.timeout(type === 'untimeout' ? null : min * 60000, reason);
     }
   }
   db.cases.unshift({ id: nid(), t: now(), type, uid, reason, min, by, gid }); save();
@@ -141,7 +142,7 @@ app.get('/', auth(), (req, res) => {
   const T = (h, t, s, ok = 1) => ok ? `<a class=tile href="${h}"><b>${t}</b><small>${s}</small></a>` : '<span class="tile off"></span>';
   const Gp = (t, items) => fs_(t, `<div class=g>${items.join('')}</div>`);
   res.send(page(u, 'メインメニュー',
-    Gp('処分業務(BAN・KICK・タイムアウト)', [T('/act/ban', 'BAN', 'ユーザー追放'), T('/act/kick', 'KICK', 'ユーザー退出'), T('/act/timeout', 'タイムアウト', '発言停止'), T('/act/warn', '警告', '警告記録')]) +
+    Gp('処分業務(BAN・KICK・タイムアウト)', [T('/act/ban', 'BAN', 'ユーザー追放'), T('/act/kick', 'KICK', 'ユーザー退出'), T('/act/timeout', 'タイムアウト', '発言停止'), T('/act/warn', '警告', '警告記録'), T('/act/unban', 'BAN解除', '追放を解除'), T('/act/untimeout', 'タイムアウト解除', '発言停止を解除')]) +
     Gp('申請・承認', [T('/approve', '申請承認', '承認待ち', can(u, 'approve')), T('/myreqs', '自分の申請', '申請状況'), T('/logs', '操作ログ', '実行履歴'), T('/history', '処分履歴照会', 'アカウント別')]) +
     Gp('通信業務', [T('/dms', 'DM受信', 'BOT宛DM'), T('/dm', 'DM送信', 'ユーザー宛DM'), T('/inbox', '管理者間通信', 'サイト内・メール'), T('/allmsgs', '全メッセージ管理', 'メッセージ削除', can(u, 'delMsg'))]) +
     Gp('設定業務', [T('/accounts', 'アカウント管理', '追加・削除', can(u, 'accounts')), T('/password', 'パスワード変更', '自分のパスワード')]), ['更新', '終了']));
@@ -156,14 +157,14 @@ app.get('/act/:type', auth(), (req, res) => {
   const uid = '<label>対象のDiscordユーザーID<input name=uid required pattern="\\d{15,22}" inputmode=numeric></label>';
   const rest = t === 'warn' ? '<label>警告の内容(本人にDMで送られます)<textarea name=reason rows=5 required maxlength=200></textarea></label>'
     : (t === 'timeout' ? `<label>時間<select name=min>${DUR.map(m => `<option value=${m}${m === 60 ? ' selected' : ''}>${fmtMin(m)}`).join('')}</select></label>` : '') +
-      '<label>理由(任意)<input name=reason maxlength=200></label><label><input type=checkbox name=notify value=1> この理由をBOT経由で本人にDMで送る</label>';
+      '<label>理由(任意)<input name=reason maxlength=200></label>' + (t === 'unban' ? '' : '<label><input type=checkbox name=notify value=1> この理由をBOT経由で本人にDMで送る</label>');
   res.send(page(u, TYPES[t], fs_(TYPES[t], `${note('対象サーバー: ' + gname(u.gid))}${note(top)}<form method=post class=main>${uid}${rest}</form>${t === 'warn' ? note('警告は処分履歴に残ります。承認は要りません。') : ''}`), FORM));
 });
 app.post('/act/:type', auth(), async (req, res) => {
   const t = req.params.type, u = req.u, uid = req.body.uid, reason = String(req.body.reason || '').slice(0, 200);
   const min = t === 'timeout' ? +req.body.min : 0, notify = t === 'warn' || !!req.body.notify;
   if (!TYPES[t] || !u.gid || !isId(uid) || (t === 'warn' && !reason) || (t === 'timeout' && !DUR.includes(min))) return bad(res, u, '入力が正しくありません');
-  if (!can(u, 'direct') && (t === 'ban' || t === 'kick' || (t === 'timeout' && min > 60))) {
+  if (!can(u, 'direct') && (['ban', 'kick', 'unban', 'untimeout'].includes(t) || (t === 'timeout' && min > 60))) {
     db.reqs.unshift({ id: nid(), t: now(), by: u.name, type: t, uid, reason, min, notify, status: '申請中', handler: '', result: '', gid: u.gid }); save();
     log(u.name, `${TYPES[t]}申請`, uid, reason, u.gid); return res.redirect('/myreqs');
   }
