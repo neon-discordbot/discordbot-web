@@ -449,13 +449,20 @@ app.post('/summon', auth('direct'), run(async (req, res) => {
 let mailer = null;
 try {
   if (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD)
-    mailer = require('nodemailer').createTransport({ host: 'smtp.gmail.com', port: 465, secure: true, connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 15000, auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD.replace(/\s/g, '') } });
+    mailer = require('nodemailer').createTransport({ host: 'smtp.gmail.com', port: +process.env.SMTP_PORT || 465, secure: (+process.env.SMTP_PORT || 465) === 465, connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 15000, auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD.replace(/\s/g, '') } });
 } catch (e) { console.error('nodemailer を読み込めません(package.json の更新が必要です)'); }
-const MAIL_OK = !!mailer;
+const HOOK = process.env.MAIL_WEBHOOK_URL, MAIL_OK = !!mailer || !!HOOK; // MAIL_WEBHOOK_URL: Google Apps Script経由(SMTPが使えないホスト向け)
 const needMfa = u => u.mfa && !process.env.MFA_BYPASS; // MFA_BYPASS=1 は緊急用(メールが使えないときだけ設定)
 const sha = c => crypto.createHash('sha256').update(c + SESSION_SECRET).digest('hex');
 const maskMail = m => String(m).replace(/^(.).*(@.*)$/, '$1***$2');
-const sendMail = (to, subject, text) => mailer.sendMail({ from: `管理システム端末 <${process.env.GMAIL_USER}>`, to, subject, text });
+const sendMail = async (to, subject, text) => {
+  if (HOOK) {
+    const r = await fetch(HOOK, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ secret: process.env.MAIL_WEBHOOK_SECRET, to, subject, text }), signal: AbortSignal.timeout(20000) });
+    if ((await r.text()).trim() !== 'OK') throw new Error('メール送信サービスがエラーを返しました(URLと合言葉を確認してください)');
+    return;
+  }
+  return mailer.sendMail({ from: `管理システム端末 <${process.env.GMAIL_USER}>`, to, subject, text });
+};
 async function sendCode(req, u) {
   if (!MAIL_OK || !u.email) throw new Error('メール送信が設定されていません');
   const code = String(crypto.randomInt(0, 1e6)).padStart(6, '0');
