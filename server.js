@@ -1,6 +1,7 @@
 require('dotenv').config();
 const fs = require('fs'), express = require('express'), session = require('express-session'), bcrypt = require('bcryptjs');
 const { Client, GatewayIntentBits: G, Partials, Events, EmbedBuilder } = require('discord.js');
+const crypto = require('crypto');
 const { DISCORD_TOKEN, GUILD_ID, SESSION_SECRET, OWNER_USER = 'owner', OWNER_PASS, PORT = 3000 } = process.env;
 const GIDS = (process.env.GUILD_IDS || GUILD_ID || '').split(',').map(x => x.trim()).filter(Boolean);
 if (!GIDS.length) { console.error('GUILD_IDS(サーバーID。複数ならカンマ区切り)を設定してください'); process.exit(1); }
@@ -119,13 +120,14 @@ const auth = perm => (req, res, next) => {
 const fails = {};
 const loginPage = t => page(null, 'ログイン', fs_('ログイン', `${note(t)}<form method=post><label>アカウント<input name=name required autocomplete=username></label><label>パスワード<input name=pass type=password required autocomplete=current-password></label><button>ログイン</button></form>`), []);
 app.get('/login', (req, res) => res.send(loginPage()));
-app.post('/login', (req, res) => {
+app.post('/login', async (req, res) => {
   let f = fails[req.ip];
   if (!f || Date.now() - f.t > 6e5) f = fails[req.ip] = { n: 0, t: Date.now() };
   if (f.n >= 5) return res.status(429).send(loginPage('試行回数が多すぎます。10分後にやり直してください。'));
   const u = db.users.find(x => x.name === req.body.name);
   if (u && bcrypt.compareSync(req.body.pass || '', u.hash)) {
     delete fails[req.ip];
+    if (needMfa(u)) { try { await sendCode(req, u); return res.redirect('/login/code'); } catch (e) { log(u.name, '2段階認証メール送信失敗', '', e.message); return res.status(500).send(loginPage('確認メールを送信できませんでした。最高管理者に連絡してください。')); } }
     return req.session.regenerate(() => { req.session.uid = u.id; log(u.name, 'ログイン'); res.redirect('/'); });
   }
   f.n++; f.t = Date.now(); log(String(req.body.name || '').slice(0, 20), 'ログイン失敗');
@@ -443,6 +445,50 @@ app.post('/summon', auth('direct'), run(async (req, res) => {
   res.send(done(u, '緊急招集', `#${c.name} に投稿し、${ids.length}人にDMで知らせました${staff.length - ids.length ? `(Discord ID未登録の${staff.length - ids.length}人は管理者間通信のみ)` : ''}`));
 }));
 
+// ---- メールによる2段階認証(Gmail) ----
+let mailer = null;
+try {
+  if (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD)
+    mailer = require('nodemailer').createTransport({ host: 'smtp.gmail.com', port: 465, secure: true, connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 15000, auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_APP_PASSWORD.replace(/\s/g, '') } });
+} catch (e) { console.error('nodemailer を読み込めません(package.json の更新が必要です)'); }
+const MAIL_OK = !!mailer;
+const needMfa = u => u.mfa && !process.env.MFA_BYPASS; // MFA_BYPASS=1 は緊急用(メールが使えないときだけ設定)
+const sha = c => crypto.createHash('sha256').update(c + SESSION_SECRET).digest('hex');
+const maskMail = m => String(m).replace(/^(.).*(@.*)$/, '$1***$2');
+const sendMail = (to, subject, text) => mailer.sendMail({ from: `管理システム端末 <${process.env.GMAIL_USER}>`, to, subject, text });
+async function sendCode(req, u) {
+  if (!MAIL_OK || !u.email) throw new Error('メール送信が設定されていません');
+  const code = String(crypto.randomInt(0, 1e6)).padStart(6, '0');
+  await sendMail(u.email, '【管理システム端末】ログイン確認コード', `ログイン確認コード: ${code}\n有効期限は10分です。\n心当たりがない場合は、このメールを無視して、最高管理者に連絡してください。`);
+  req.session.mfa = { uid: u.id, h: sha(code), exp: Date.now() + 6e5, tries: 0, sent: Date.now() };
+}
+const codePage = (u, t) => page(null, 'ログイン(2段階認証)', fs_('確認コードの入力', `${note(t)}${note(`${maskMail(u.email)} にコードを送りました(有効期限10分)`)}<form method=post><label>6桁のコード<input name=code inputmode=numeric autocomplete=one-time-code pattern="\\d{6}" maxlength=6 required></label><button>確認</button></form><form method=post action=/login/resend style="display:inline"><button>コードを再送する</button></form> <a class=b href=/login>最初に戻る</a>`), []);
+const mfaUser = req => { const m = req.session.mfa; return m && db.users.find(x => x.id === m.uid); };
+app.get('/login/code', (req, res) => { const u = mfaUser(req); if (!u) return res.redirect('/login'); res.send(codePage(u)); });
+app.post('/login/code', (req, res) => {
+  const u = mfaUser(req), m = req.session.mfa;
+  if (!u) return res.redirect('/login');
+  if (Date.now() > m.exp || m.tries >= 5) { delete req.session.mfa; return res.status(401).send(loginPage('コードの期限切れ、または入力回数の上限です。最初からやり直してください。')); }
+  m.tries++;
+  let ok = false;
+  try { ok = crypto.timingSafeEqual(Buffer.from(sha(String(req.body.code || '').trim())), Buffer.from(m.h)); } catch (e) { ok = false; }
+  if (!ok) { log(u.name, '2段階認証コード不一致'); return res.status(401).send(codePage(u, `コードが違います(残り${5 - m.tries}回)`)); }
+  req.session.regenerate(() => { req.session.uid = u.id; log(u.name, 'ログイン(2段階認証)'); res.redirect('/'); });
+});
+app.post('/login/resend', async (req, res) => {
+  const u = mfaUser(req);
+  if (!u) return res.redirect('/login');
+  if (Date.now() - req.session.mfa.sent < 6e4) return res.status(429).send(codePage(u, '再送は1分以上あけてください'));
+  try { await sendCode(req, u); res.send(codePage(u, 'コードを再送しました')); } catch (e) { res.status(500).send(codePage(u, 'メールを送信できませんでした')); }
+});
+app.post('/mfa/test', auth('accounts'), run(async (req, res) => {
+  const to = String(req.body.email || '').trim();
+  if (!MAIL_OK) return bad(res, req.u, 'メール送信が未設定です(環境変数 GMAIL_USER と GMAIL_APP_PASSWORD を設定してください)');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return bad(res, req.u, 'メールアドレスが正しくありません');
+  await sendMail(to, '【管理システム端末】テストメール', 'このメールが届いていれば、2段階認証のメール送信は正常です。');
+  log(req.u.name, 'テストメール送信', '', maskMail(to)); res.send(done(req.u, 'テストメール', `${maskMail(to)} に送信しました。届いたか確認してください。`));
+}));
+
 // ---- 全メッセージ管理(最高管理者のみ・他の人のメッセージも削除可) ----
 app.get('/allmsgs', auth('delMsg'), (req, res) => {
   const seen = new Set();
@@ -464,16 +510,21 @@ app.post('/allmsgs/:id/delete', auth('delMsg'), (req, res) => {
 
 // ---- アカウント管理(最高管理者のみ) ----
 app.get('/accounts', auth('accounts'), (req, res) => {
-  const rows = db.users.map(x => tr([esc(x.name), ROLES[x.role], esc(x.discordId || '-'), x.role === 'owner' ? '全て' : esc(allowed(x).map(gname).join(', ') || 'なし'), x.id === req.u.id ? '(自分)' : `<form method=post action=/accounts/delete onsubmit="return confirm('このアカウントを削除しますか?')"><input type=hidden name=id value=${x.id}>${PW}<button>削除</button></form>`]));
-  res.send(page(req.u, 'アカウント管理', fs_('追加 / 更新(既存の名前なら権限・パスワードを更新)', `<form method=post><label>アカウント名(英数字3〜20)<input name=name required></label><label>パスワード(8文字以上。更新時は空欄で変更なし)<input name=pass type=password autocomplete=new-password></label><label>DiscordユーザーID(任意。緊急招集・新着通知に使います)<input name=did inputmode=numeric></label><label>権限<select name=role>${Object.entries(ROLES).map(([k, v]) => `<option value=${k}>${v}`).join('')}</select></label><div>操作できるサーバー(最高管理者は全サーバー): ${GIDS.map(g => `<label><input type=checkbox name=g value="${g}"> ${esc(gname(g))}</label> `).join('')}</div><br><button>保存</button></form>`) + fs_('アカウント一覧', table(['アカウント', '権限', 'DiscordID', '操作できるサーバー', '操作'], rows))));
+  const rows = db.users.map(x => tr([esc(x.name), ROLES[x.role], esc(x.discordId || '-'), x.mfa ? `必須(${esc(x.email ? maskMail(x.email) : '-')})` : '-', x.role === 'owner' ? '全て' : esc(allowed(x).map(gname).join(', ') || 'なし'), x.id === req.u.id ? '(自分)' : `<form method=post action=/accounts/delete onsubmit="return confirm('このアカウントを削除しますか?')"><input type=hidden name=id value=${x.id}>${PW}<button>削除</button></form>`]));
+  res.send(page(req.u, 'アカウント管理', fs_('追加 / 更新(既存の名前なら権限・パスワードを更新)', `<form method=post><label>アカウント名(英数字3〜20)<input name=name required></label><label>パスワード(8文字以上。更新時は空欄で変更なし)<input name=pass type=password autocomplete=new-password></label><label>DiscordユーザーID(任意。緊急招集・新着通知に使います)<input name=did inputmode=numeric></label><label>メールアドレス(2段階認証用。空欄なら変更しません)<input name=email type=email></label><label>メールによる2段階認証<select name=mfa><option value=keep>変更しない(新規は不要)<option value=on>必須にする<option value=off>不要にする</select></label><label>(2段階認証を不要にするときだけ)あなたのパスワード<input type=password name=pw autocomplete=current-password></label><label>権限<select name=role>${Object.entries(ROLES).map(([k, v]) => `<option value=${k}>${v}`).join('')}</select></label><div>操作できるサーバー(最高管理者は全サーバー): ${GIDS.map(g => `<label><input type=checkbox name=g value="${g}"> ${esc(gname(g))}</label> `).join('')}</div><br><button>保存</button></form>`) + fs_('メール送信のテスト(2段階認証用)', `${note(MAIL_OK ? 'Gmailの送信設定は有効です。2段階認証を必須にする前に、テストメールが届くか確認してください。' : '未設定です(環境変数 GMAIL_USER と GMAIL_APP_PASSWORD が必要です)')}<form method=post action=/mfa/test><label>送信先<input name=email type=email required></label><button>テストメールを送る</button></form>`) + fs_('アカウント一覧', table(['アカウント', '権限', 'DiscordID', '2段階認証', '操作できるサーバー', '操作'], rows))));
 });
 app.post('/accounts', auth('accounts'), (req, res) => {
   const { name, pass, role } = req.body, ex = db.users.find(x => x.name === name);
   const gs = [].concat(req.body.g || []).filter(g => GIDS.includes(g)), did = String(req.body.did || '').trim();
-  if (!/^[\w-]{3,20}$/.test(name || '') || !ROLES[role] || (pass && pass.length < 8) || (!ex && !pass) || (ex && ex.id === req.u.id && role !== 'owner') || (role !== 'owner' && !gs.length) || (did && !isId(did)))
+  const email = String(req.body.email || '').trim(), mfa = ['on', 'off'].includes(req.body.mfa) ? req.body.mfa : 'keep';
+  if (!/^[\w-]{3,20}$/.test(name || '') || !ROLES[role] || (pass && pass.length < 8) || (!ex && !pass) || (ex && ex.id === req.u.id && role !== 'owner') || (role !== 'owner' && !gs.length) || (did && !isId(did)) || (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)))
     return bad(res, req.u, '入力が正しくありません(自分自身の権限は下げられません / 最高管理者以外は操作できるサーバーを1つ以上選んでください)');
-  if (ex) { ex.role = role; ex.guilds = gs; if (did) ex.discordId = did; if (pass) ex.hash = bcrypt.hashSync(pass, 10); }
-  else db.users.push({ id: nid(), name, hash: bcrypt.hashSync(pass, 10), role, guilds: gs, discordId: did || undefined });
+  const mail = email || (ex && ex.email) || '';
+  if (mfa === 'on' && !mail) return bad(res, req.u, '2段階認証を必須にするには、メールアドレスが必要です');
+  if (mfa === 'on' && !MAIL_OK) return bad(res, req.u, 'メール送信が未設定のため、2段階認証を必須にできません(GMAIL_USER / GMAIL_APP_PASSWORD)');
+  if (mfa === 'off' && ex && ex.mfa && !pwOk(req.u, req)) return bad(res, req.u, '2段階認証を不要にするには、あなたのパスワードの入力が必要です');
+  if (ex) { ex.role = role; ex.guilds = gs; if (did) ex.discordId = did; if (email) ex.email = email; if (mfa !== 'keep') ex.mfa = mfa === 'on'; if (pass) ex.hash = bcrypt.hashSync(pass, 10); }
+  else db.users.push({ id: nid(), name, hash: bcrypt.hashSync(pass, 10), role, guilds: gs, discordId: did || undefined, email: email || undefined, mfa: mfa === 'on' });
   save(); log(req.u.name, ex ? 'アカウント更新' : 'アカウント追加', name, ROLES[role]); res.redirect('/accounts');
 });
 app.post('/accounts/delete', auth('accounts'), (req, res) => {
