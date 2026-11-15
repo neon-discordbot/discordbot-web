@@ -40,7 +40,7 @@ bot.on(Events.MessageCreate, async m => {
   if (m.guild || m.author.bot) return;
   const gids = [];
   for (const g of GIDS) if (await bot.guilds.fetch(g).then(x => x.members.fetch(m.author.id)).catch(() => null)) gids.push(g);
-  db.dms.unshift({ id: nid(), t: now(), uid: m.author.id, name: m.author.tag, text: m.content, gids });
+  db.dms.unshift({ id: nid(), t: now(), uid: m.author.id, name: m.author.tag, text: m.content, gids, ts: Date.now() });
   db.dms = db.dms.slice(0, 300); save();
 });
 bot.login(DISCORD_TOKEN);
@@ -70,7 +70,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const KEYS = ['メニュー', '戻る', '保存', '更新', '開始', '終了', '承認', '却下', '照会', '発信', '予約', '保持', '解放'];
 const ACT = { メニュー: "location='/'", 戻る: 'history.back()', 更新: 'location.reload()', 終了: "location='/logout'", 照会: 'doLookup()', 発信: 'doSend()', 解放: 'doReset()' };
 const BASE = ['メニュー', '戻る', '更新', '終了'], FORM = [...BASE, '照会', '発信', '解放'];
-const status = u => `<div class=st>係員 <span class=v>${esc(u.name)}</span> 権限区分 <span class=v>${ROLES[u.role]}</span> サーバー <form method=post action=/server><select name=gid onchange="this.form.submit()">${allowed(u).map(g => `<option value="${g}"${g === u.gid ? ' selected' : ''}>${esc(gname(g))}`).join('')}</select></form> 日時 <span class=v>${now()}</span> BOT <span class=v>${bot.isReady() ? `稼働中 ${bot.ws.ping}ms` : '停止中'}</span> 未読 <span class=v>${db.msgs.filter(m => m.to === u.name && !m.read && m.gid === u.gid).length} 件</span> <a class=b href=/inbox>管理者間通信</a> <a class=b href=/lock>端末ロック</a> <small>${online(u)}</small></div>`;
+const status = u => `<div class=st>係員 <span class=v>${esc(u.name)}</span> 権限区分 <span class=v>${ROLES[u.role]}</span> サーバー <form method=post action=/server><select name=gid onchange="this.form.submit()">${allowed(u).map(g => `<option value="${g}"${g === u.gid ? ' selected' : ''}>${esc(gname(g))}`).join('')}</select></form> 日時 <span class=v>${now()}</span> BOT <span class=v>${bot.isReady() ? `稼働中 ${bot.ws.ping}ms` : '停止中'}</span> 未読 <span class=v>${db.msgs.filter(m => m.to === u.name && !m.read && m.gid === u.gid).length} 件</span> <a class=b href=/inbox>管理者間通信</a> <a class=b href=/lock>端末ロック</a> <a class=b href=# onclick="dk();return false">ダークモード</a> <small id=ol>${online(u)}</small></div><div id=sa class="note alert" style="display:${staleItems(u).length ? 'block' : 'none'}">未対応のまま2時間以上放置されている案件が${staleItems(u).length}件あります</div>`;
 const page = (u, title, body, on = BASE, act = {}) => `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>管理システム端末</title><style>
 body{margin:0;background:#d9d9d9;font:14px sans-serif;color:#111}
 h1{margin:0;background:linear-gradient(#2a45b5,#1a2f9a);color:#fff;text-align:center;font-weight:400;font-size:15px;letter-spacing:.2em;padding:13px 8px}
@@ -82,17 +82,18 @@ input,select,textarea{font:inherit;padding:7px;box-sizing:border-box;background:
 form input:not([type=checkbox]),form select,form textarea{width:100%;max-width:600px;display:block;margin:4px 0 12px}
 fieldset{border:1px solid #999;padding:10px;margin:0 0 12px}
 table{width:100%;border-collapse:collapse;background:#f4f4f4}td,th{border:1px solid #999;padding:7px;text-align:left;vertical-align:top;white-space:pre-wrap}th{background:#c8c8c8}
-.note{background:#eee;border:1px solid #999;padding:9px;margin:6px 0 12px}
+.note{background:#eee;border:1px solid #999;padding:9px;margin:6px 0 12px}.alert{background:#fdd;border-color:#c00;color:#900;font-weight:700;animation:bl 1s step-start infinite}@keyframes bl{50%{opacity:.35}}
 .g{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px}
 .tile{display:block;background:#e4e4e4;border:2px outset #fff;padding:12px 8px;text-align:center;color:#111;text-decoration:none;min-height:48px}
 .tile small{display:block;margin-top:6px;background:#eee;border:1px solid #999;padding:2px;font-size:12px}.tile.off{background:#d0d0d0;border:2px solid #ccc}
-</style><h1>管理システム端末(version 5.0.0) ${esc(title)}</h1><div class=w>
+html.dk{filter:invert(1) hue-rotate(180deg)}</style><script>try{if(localStorage.getItem('dk')==='1')document.documentElement.classList.add('dk')}catch(e){}</script><h1>管理システム端末(version 5.0.0) ${esc(title)}</h1><div class=w>
 <div class=tb>${KEYS.map(k => on.includes(k) ? `<button type=button class=on onclick="${act[k] || ACT[k]}">${k}</button>` : `<button disabled>${k}</button>`).join('')}</div>
 ${u ? status(u) + '<div id=nb class=note style="display:none"><a href=/inbox>管理者間通信に新着メッセージがあります</a></div>' : ''}${body}</div><script>
 function F(){return document.querySelector('form.main')}
 function doLookup(){var f=F(),i=f&&f.elements.uid;if(f&&f.method=='get')f.submit();else location='/history'+(i&&i.value?'?uid='+encodeURIComponent(i.value):'')}
 function doSend(){var f=F();if(f){f.requestSubmit?f.requestSubmit():f.submit()}}
-function doReset(){var f=F();if(f)f.reset()}${u ? POLL : ''}</script>`;
+function doReset(){var f=F();if(f)f.reset()}
+function dk(){var d=document.documentElement.classList.toggle('dk');try{localStorage.setItem('dk',d?'1':'0')}catch(e){}}${u ? POLL : ''}</script>`;
 const note = t => t ? `<div class=note>${esc(t)}</div>` : '';
 const fs_ = (legend, inner) => `<fieldset><legend>${esc(legend)}</legend>${inner}</fieldset>`;
 const done = (u, title, t, on) => page(u, title, fs_(title, note(t)), on);
@@ -147,7 +148,7 @@ app.get('/', auth(), (req, res) => {
   const Gp = (t, items) => fs_(t, `<div class=g>${items.join('')}</div>`);
   res.send(page(u, 'メインメニュー', memoBox(u) +
     Gp('処分業務(BAN・KICK・タイムアウト)', [T('/act/ban', 'BAN', 'ユーザー追放'), T('/act/kick', 'KICK', 'ユーザー退出'), T('/act/timeout', 'タイムアウト', '発言停止'), T('/act/warn', '警告', '警告記録'), T('/act/unban', 'BAN解除', '追放を解除'), T('/act/untimeout', 'タイムアウト解除', '発言停止を解除')]) +
-    Gp('申請・承認', [T('/approve', '申請承認', '承認待ち', can(u, 'approve')), T('/myreqs', '自分の申請', '申請状況'), T('/logs', '操作ログ', '実行履歴'), T('/history', '処分履歴照会', 'アカウント別')]) +
+    Gp('申請・承認', [T('/approve', '申請承認', `未対応 ${db.reqs.filter(r => r.gid === u.gid && r.status === '申請中' && !r.lock).length}件`, can(u, 'approve')), T('/myreqs', '自分の申請', '申請状況'), T('/logs', '操作ログ', '実行履歴'), T('/history', '処分履歴照会', 'アカウント別'), T('/staffstats', '稼働実績', 'スタッフ別集計', can(u, 'logsAll'))]) +
     Gp('通信業務', [T('/dms', 'DM受信', `未対応 ${db.dms.filter(d => visDm(u, d) && (d.st || 'todo') === 'todo').length}件`), T('/dm', 'DM送信', 'ユーザー宛DM'), T('/inbox', '管理者間通信', 'サイト内・メール'), T('/allmsgs', '全メッセージ管理', 'メッセージ削除', can(u, 'delMsg')), T('/summon', '緊急招集', 'Discordでメンション', can(u, 'direct'))]) +
     Gp('サーバー管理', [T('/user', 'ユーザー情報', 'ID・ロール・警告'), T('/vc', 'VC管理', '参加者・切断・ミュート'), T('/invites', '招待リンク', '確認・破棄', can(u, 'direct')), T('/embed', '埋め込み投稿', 'Botから投稿', can(u, 'direct')), T('/emerg', '緊急対応', '封鎖・低速・ゲート', can(u, 'release'))]) +
     Gp('設定業務', [T('/accounts', 'アカウント管理', '追加・削除', can(u, 'accounts')), T('/password', 'パスワード変更', '自分のパスワード')]), ['更新', '終了']));
@@ -170,7 +171,7 @@ app.post('/act/:type', auth(), async (req, res) => {
   const min = t === 'timeout' ? +req.body.min : 0, notify = t === 'warn' || !!req.body.notify;
   if (!TYPES[t] || !u.gid || !isId(uid) || (t === 'warn' && !reason) || (t === 'timeout' && !DUR.includes(min))) return bad(res, u, '入力が正しくありません');
   if (!can(u, 'direct') && (['ban', 'kick', 'unban', 'untimeout'].includes(t) || (t === 'timeout' && min > 60))) {
-    db.reqs.unshift({ id: nid(), t: now(), by: u.name, type: t, uid, reason, min, notify, status: '申請中', handler: '', result: '', gid: u.gid }); save();
+    db.reqs.unshift({ id: nid(), t: now(), by: u.name, type: t, uid, reason, min, notify, status: '申請中', handler: '', result: '', gid: u.gid, ts: Date.now() }); save();
     log(u.name, `${TYPES[t]}申請`, uid, reason, u.gid); return res.redirect('/myreqs');
   }
   try { await exec(u.name, t, uid, reason, min, notify, u.gid); res.send(done(u, TYPES[t], `${gname(u.gid)}で${pun(t, min)}を実行しました`)); }
@@ -184,12 +185,17 @@ app.get('/myreqs', auth(), (req, res) => {
 });
 app.get('/approve', auth('approve'), (req, res) => {
   const rows = db.reqs.filter(r => r.gid === req.u.gid).slice(0, 100).map(r => tr([r.id, esc(r.by), pun(r.type, r.min), esc(r.uid), esc(r.reason), esc(r.t),
-    r.status === '申請中' ? `<form method=post action=/approve/${r.id}><button name=a value=ok>承認</button> <button name=a value=no>却下</button></form>` : `${esc(r.status)}(${esc(r.handler)})`]));
+    r.status === '申請中' ? reqBtns(r, req.u) : `${esc(r.status)}(${esc(r.handler)})`]));
   res.send(page(req.u, '申請承認', fs_('申請一覧', rows.length ? table(['番号', '申請者', '予定処罰', '対象ID', '理由', '申請日時', '状況'], rows) : empty('申請はありません。'))));
 });
 app.post('/approve/:id', auth('approve'), async (req, res) => {
   const r = db.reqs.find(x => x.id === +req.params.id);
   if (!r || r.status !== '申請中' || !allowed(req.u).includes(r.gid)) return res.redirect('/approve');
+  const a = req.body.a, mine = r.lock && r.lock.by === req.u.name;
+  if (a === 'lock') { if (!r.lock) { r.lock = { by: req.u.name, at: Date.now() }; save(); log(req.u.name, '申請の対応開始', r.uid, `#${r.id}`, r.gid); } return res.redirect('/approve'); }
+  if (a === 'unlock') { if (mine || req.u.role === 'owner') { delete r.lock; save(); } return res.redirect('/approve'); }
+  if (r.lock && !mine && req.u.role !== 'owner') return bad(res, req.u, `${r.lock.by}が対応中です(ロック中)`);
+  delete r.lock;
   r.handler = req.u.name;
   if (req.body.a === 'ok') {
     r.status = '承認済';
@@ -284,7 +290,7 @@ app.get('/user', auth(), run(async (req, res) => {
   if (q) {
     const g = await G_(u);
     const ms = isId(q) ? [await g.members.fetch(q).catch(() => null)].filter(Boolean) : [...(await g.members.search({ query: q, limit: 10 })).values()];
-    const roleOpts = [...g.roles.cache.values()].filter(r => r.id !== g.id && !r.managed && r.editable && (u.role === 'owner' || !r.permissions.has('Administrator'))).sort((a, b) => b.position - a.position).map(r => `<option value=${r.id}>${esc(r.name)}`).join('');
+    const roleOpts = [...g.roles.cache.values()].filter(r => r.id !== g.id && !r.managed && r.editable && (u.role === 'owner' || !isDangerous(r))).sort((a, b) => b.position - a.position).map(r => `<option value=${r.id}>${esc(r.name)}`).join('');
     const hist = id => { const c = db.cases.filter(x => x.gid === u.gid && x.uid === id), n = t => c.filter(x => x.type === t).length; return { warn: n('warn'), txt: `警告${n('warn')} / タイムアウト${n('timeout')} / KICK${n('kick')} / BAN${n('ban')}` }; };
     for (const m of ms) {
       const h = hist(m.id), to = m.communicationDisabledUntilTimestamp > Date.now() ? `タイムアウト中(〜${fmtD(m.communicationDisabledUntilTimestamp)})` : '通常';
@@ -305,7 +311,7 @@ app.post('/role', auth('direct'), run(async (req, res) => {
   if (!isId(uid) || !isId(rid) || !['add', 'remove'].includes(a)) return bad(res, u, '入力が正しくありません');
   const g = await G_(u), role = g.roles.cache.get(rid), m = await g.members.fetch(uid);
   if (!role || role.managed || role.id === g.id) return bad(res, u, 'このロールは操作できません');
-  if (u.role !== 'owner' && role.permissions.has('Administrator')) return bad(res, u, '管理者権限を持つロールは最高管理者だけが操作できます');
+  if (u.role !== 'owner' && isDangerous(role)) return bad(res, u, '危険な権限(管理者・サーバー管理・BANなど)を含むロールは最高管理者だけが操作できます');
   if (a === 'add') await m.roles.add(role, `by ${u.name}`); else await m.roles.remove(role, `by ${u.name}`);
   log(u.name, a === 'add' ? 'ロール付与' : 'ロール解除', uid, role.name, u.gid);
   res.redirect('/user?q=' + uid);
@@ -399,15 +405,16 @@ app.post('/emerg/:act', auth('release'), run(async (req, res) => {
 
 // ---- 端末ロック・稼働中スタッフ・共有メモ・対応ステータス・緊急招集・新着通知 ----
 const seen = new Map();
-const online = u => { const l = [...seen.values()].filter(x => Date.now() - x.ts < 3e5 && x.gid === u.gid); return `稼働中 ${l.filter(x => !x.away).length}人: ${esc(l.map(x => x.name + (x.away ? '(離席)' : '')).join(', ') || '-')}`; };
+const onlineText = u => { const l = [...seen.values()].filter(x => Date.now() - x.ts < 3e5 && x.gid === u.gid); return `稼働中 ${l.filter(x => !x.away).length}人: ${l.map(x => x.name + (x.away ? '(離席)' : '')).join(', ') || '-'}`; };
+const online = u => esc(onlineText(u));
 const PW = '<input type=password name=pw placeholder="パスワードを再入力" required autocomplete=current-password>';
 const pwOk = (u, req) => bcrypt.compareSync(req.body.pw || '', u.hash);
 const lockPage = (u, t) => page(null, '端末ロック', fs_(`端末ロック中(${u.name})`, `${note(t)}<form method=post action=/unlock><label>パスワード<input name=pass type=password autocomplete=current-password></label><button>ロック解除</button></form><a class=b href=/logout>ログアウト</a>`), []);
-const stLabel = d => d.st === 'doing' ? `${d.by}が対応中` : d.st === 'done' ? `完了(${d.by})` : '未対応';
+const stLabel = d => d.st === 'doing' ? `${d.by}が対応中(ロック)` : d.st === 'done' ? `完了(${d.by})` : '未対応';
 const memoBox = u => { const m = db.memo[u.gid]; return `<div class=note style="font-weight:700">${m && m.text ? esc(m.text) : '(共有メモはありません)'}${m ? `<br><small>更新: ${esc(m.by)} ${esc(m.at)}</small>` : ''}</div><form method=post action=/memo><input name=text maxlength=200 value="${esc(m ? m.text : '')}" placeholder="全体共有メモ(例:【警戒】スパムURL荒らし発生中 / ○○さんは22時まで対応可)"><button>メモを保存</button></form>`; };
-const POLL = "var N=null;function beep(){try{var a=new (window.AudioContext||window.webkitAudioContext)(),o=a.createOscillator();o.connect(a.destination);o.frequency.value=880;o.start();setTimeout(function(){o.stop()},250)}catch(e){}}function poll(){fetch('/api/unread').then(function(r){return r.json()}).then(function(j){if(N!==null&&j.n>N){beep();document.title='(新着) 管理システム端末';var b=document.getElementById('nb');if(b)b.style.display='block'}N=j.n}).catch(function(){})}setInterval(poll,15000);poll();";
+const POLL = "var N=null;function beep(){try{var a=new (window.AudioContext||window.webkitAudioContext)(),o=a.createOscillator();o.connect(a.destination);o.frequency.value=880;o.start();setTimeout(function(){o.stop()},250)}catch(e){}}function poll(){fetch('/api/unread').then(function(r){return r.json()}).then(function(j){if(N!==null&&j.n>N){beep();document.title='(新着) 管理システム端末';var b=document.getElementById('nb');if(b)b.style.display='block'}var o=document.getElementById('ol');if(o&&j.ol)o.textContent=j.ol;var s=document.getElementById('sa');if(s){s.style.display=j.stale>0?'block':'none';s.textContent='未対応のまま2時間以上放置されている案件が'+j.stale+'件あります'}N=j.n}).catch(function(){})}setInterval(poll,15000);poll();";
 
-app.get('/api/unread', auth(), (req, res) => res.json({ n: db.msgs.filter(m => m.to === req.u.name && !m.read && m.gid === req.u.gid).length }));
+app.get('/api/unread', auth(), (req, res) => res.json({ n: db.msgs.filter(m => m.to === req.u.name && !m.read && m.gid === req.u.gid).length, ol: onlineText(req.u), stale: staleItems(req.u).length }));
 app.get('/lock', auth(), (req, res) => { const s = seen.get(req.u.id); if (s) s.away = true; req.session.locked = true; log(req.u.name, '端末ロック', '', '', req.u.gid); res.redirect('/'); });
 app.post('/unlock', auth(), (req, res) => {
   if (!bcrypt.compareSync(req.body.pass || '', req.u.hash)) {
@@ -424,6 +431,7 @@ app.post('/memo', auth(), (req, res) => {
 app.post('/dms/:id/st', auth(), (req, res) => {
   const d = db.dms.find(x => x.id === +req.params.id && visDm(req.u, x)), s = req.body.s;
   if (!d || !['todo', 'doing', 'done'].includes(s)) return res.redirect('/dms');
+  if ((d.st || 'todo') === 'doing' && d.by !== req.u.name && req.u.role !== 'owner') return bad(res, req.u, `${d.by}が対応中です(ロック中)`);
   d.st = s; d.by = req.u.name; save(); log(req.u.name, 'DM対応状況', d.uid, stLabel(d), req.u.gid); res.redirect('/dms/' + d.id);
 });
 
@@ -458,7 +466,8 @@ const maskMail = m => String(m).replace(/^(.).*(@.*)$/, '$1***$2');
 const sendMail = async (to, subject, text) => {
   if (HOOK) {
     const r = await fetch(HOOK, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ secret: process.env.MAIL_WEBHOOK_SECRET, to, subject, text }), signal: AbortSignal.timeout(20000) });
-    if ((await r.text()).trim() !== 'OK') throw new Error('メール送信サービスがエラーを返しました(URLと合言葉を確認してください)');
+    const body = (await r.text()).trim();
+    if (body !== 'OK') throw new Error(body === 'NG' ? '合言葉が一致しません(ホストの MAIL_WEBHOOK_SECRET と Apps Script の合言葉を同じにしてください)' : body.startsWith('<') ? 'Apps Scriptの権限またはデプロイ設定の問題です(「アクセスできるユーザー」を「全員」にして、新しいバージョンでデプロイし直してください)' : `メール送信サービスの応答: ${body.slice(0, 60)}`);
     return;
   }
   return mailer.sendMail({ from: `管理システム端末 <${process.env.GMAIL_USER}>`, to, subject, text });
@@ -495,6 +504,67 @@ app.post('/mfa/test', auth('accounts'), run(async (req, res) => {
   await sendMail(to, '【管理システム端末】テストメール', 'このメールが届いていれば、2段階認証のメール送信は正常です。');
   log(req.u.name, 'テストメール送信', '', maskMail(to)); res.send(done(req.u, 'テストメール', `${maskMail(to)} に送信しました。届いたか確認してください。`));
 }));
+
+// ---- 案件の放置アラート・危険ロール・稼働実績・BAN解除の外部申請 ----
+const STALE = 2 * 3600e3;
+const DANGER = ['Administrator', 'ManageGuild', 'ManageRoles', 'ManageChannels', 'ManageWebhooks', 'BanMembers', 'KickMembers', 'ModerateMembers', 'MentionEveryone'];
+const isDangerous = r => r.permissions.any(DANGER);
+const staleItems = u => [...db.dms.filter(d => visDm(u, d) && (d.st || 'todo') === 'todo' && d.ts && Date.now() - d.ts > STALE),
+  ...(can(u, 'approve') ? db.reqs.filter(r => r.gid === u.gid && r.status === '申請中' && !r.lock && r.ts && Date.now() - r.ts > STALE) : [])];
+const reqBtns = (r, u) => {
+  const f = (a, l) => `<button name=a value=${a}>${l}</button>`, mine = r.lock && r.lock.by === u.name, other = r.lock && !mine;
+  const head = other ? `<b>${esc(r.lock.by)}が対応中(ロック)</b> ` + (u.role === 'owner' ? f('unlock', 'ロック解除') + ' ' : '') : (mine ? f('unlock', '対応を外す') : f('lock', '対応する')) + ' ';
+  return `<form method=post action=/approve/${r.id}>${head}${!other || u.role === 'owner' ? f('ok', '承認') + ' ' + f('no', '却下') : ''}</form>`;
+};
+function checkStale() {
+  for (const gid of GIDS) {
+    const items = [...db.dms.filter(d => d.gids.includes(gid) && (d.st || 'todo') === 'todo' && d.ts && Date.now() - d.ts > STALE && !d.alerted), ...db.reqs.filter(r => r.gid === gid && r.status === '申請中' && !r.lock && r.ts && Date.now() - r.ts > STALE && !r.alerted)];
+    if (!items.length) continue;
+    items.forEach(x => { x.alerted = true; });
+    const text = `未対応のまま2時間以上放置されている案件が${items.length}件あります。DM受信・申請承認を確認してください。`, t = now();
+    db.users.filter(x => allowed(x).includes(gid)).forEach(x => { db.msgs.unshift({ id: nid(), t, from: 'システム', to: x.name, subject: '【放置アラート】', text, read: false, gid }); if (x.discordId) bot.users.send(x.discordId, `【${gname(gid)}】${text}`).catch(() => {}); });
+    save();
+  }
+}
+setInterval(checkStale, 6e5);
+
+app.get('/staffstats', auth('logsAll'), (req, res) => {
+  const u = req.u, days = [1, 7, 30].includes(+req.query.days) ? +req.query.days : 7, from = fmtD(Date.now() - days * 864e5);
+  const rows = db.users.filter(x => allowed(x).includes(u.gid)).map(x => {
+    const l = db.logs.filter(e => e.who === x.name && e.t >= from && (!e.gid || e.gid === u.gid)), n = f => l.filter(f).length;
+    return tr([esc(x.name), ROLES[x.role], n(e => e.op === 'BAN'), n(e => e.op === 'KICK'), n(e => e.op.startsWith('タイムアウト(')), n(e => e.op === '警告'), n(e => e.op === '申請承認済'), n(e => e.op === '申請却下'), n(e => e.op === 'DM対応状況' && e.detail.startsWith('完了')), n(e => e.op === 'ログイン' || e.op === 'ログイン(2段階認証)')]);
+  });
+  const sel = `<form method=get><label>期間<select name=days onchange="this.form.submit()">${[[1, '今日(24時間)'], [7, '7日間'], [30, '30日間']].map(([d, l]) => `<option value=${d}${d === days ? ' selected' : ''}>${l}`).join('')}</select></label></form>`;
+  res.send(page(u, '稼働実績', fs_(`スタッフ別の稼働実績(${gname(u.gid)} / 直近${days}日)`, sel + table(['スタッフ', '権限', 'BAN', 'KICK', 'タイムアウト', '警告', '申請承認', '申請却下', 'DM対応完了', 'ログイン'], rows))));
+});
+
+// BAN解除の外部申請(専用ページ / Googleフォーム連携)。スタッフ個人の情報は相手に渡らない
+const appealHits = {};
+const appealPage = (gid, msg) => page(null, 'BAN解除申請', fs_(`BAN解除申請(${gname(gid)})`, `${note(msg)}${note('BANされたアカウントのIDと、反省の内容を入力してください。審査はサーバー運営が行います。')}<form method=post><label>あなたのDiscordユーザーID<input name=uid required pattern="\\d{15,22}" inputmode=numeric></label><label>反省文・解除をお願いする理由<textarea name=text rows=8 maxlength=1000 required></textarea></label><div style="display:none"><input name=website></div><button>送信</button></form>`), []);
+async function createAppeal(gid, uid, text) {
+  if (!GIDS.includes(gid) || !isId(uid) || !text.trim()) return '入力が正しくありません';
+  const g = await bot.guilds.fetch(gid), ban = await g.bans.fetch({ user: uid, force: true }).catch(() => null);
+  if (!ban) return 'このサーバーでBANされているアカウントが見つかりません';
+  if (db.reqs.some(r => r.gid === gid && r.uid === uid && r.type === 'unban' && r.status === '申請中')) return 'すでに申請済みです。結果をお待ちください';
+  db.reqs.unshift({ id: nid(), t: now(), by: '外部フォーム', type: 'unban', uid, reason: '[アピール] ' + text.trim().slice(0, 1000), min: 0, notify: false, status: '申請中', handler: '', result: '', gid, ts: Date.now() });
+  db.users.filter(x => allowed(x).includes(gid) && CAN[x.role].includes('approve')).forEach(x => db.msgs.unshift({ id: nid(), t: now(), from: '外部フォーム', to: x.name, subject: '【BAN解除申請】', text: `ユーザーID ${uid} から解除申請が届きました。申請承認を確認してください。`, read: false, gid }));
+  save(); log('外部フォーム', 'BAN解除申請', uid, '', gid); return '';
+}
+app.get('/appeal/:gid', (req, res) => GIDS.includes(req.params.gid) ? res.send(appealPage(req.params.gid)) : res.status(404).send('Not found'));
+app.post('/appeal/:gid', async (req, res) => {
+  const gid = req.params.gid, h = appealHits[req.ip] = (appealHits[req.ip] || []).filter(t => Date.now() - t < 3.6e6);
+  if (!GIDS.includes(gid)) return res.status(404).send('Not found');
+  if (req.body.website) return res.send(appealPage(gid, '送信しました。'));
+  if (h.length >= 3) return res.status(429).send(appealPage(gid, '短時間に送信しすぎです。しばらくしてからやり直してください'));
+  h.push(Date.now());
+  let m; try { m = await createAppeal(gid, String(req.body.uid || '').trim(), String(req.body.text || '')); } catch (e) { m = '送信できませんでした。時間をおいてやり直してください'; }
+  res.send(appealPage(gid, m || '送信しました。審査の結果は、サーバー運営からお知らせします。'));
+});
+app.post('/api/appeal', async (req, res) => {
+  const k = process.env.APPEAL_SECRET;
+  if (!k || req.body.secret !== k) return res.status(403).send('NG');
+  try { const m = await createAppeal(String(req.body.gid || ''), String(req.body.uid || '').trim(), String(req.body.text || '')); res.send(m ? 'NG: ' + m : 'OK'); } catch (e) { res.status(500).send('NG'); }
+});
 
 // ---- 全メッセージ管理(最高管理者のみ・他の人のメッセージも削除可) ----
 app.get('/allmsgs', auth('delMsg'), (req, res) => {
