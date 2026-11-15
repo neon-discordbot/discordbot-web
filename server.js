@@ -10,7 +10,7 @@ if (!SESSION_SECRET || !OWNER_PASS) { console.error('SESSION_SECRET と OWNER_PA
 // ---- 保存(JSONファイル) ----
 const FILE = 'data/db.json';
 fs.mkdirSync('data', { recursive: true });
-const db = Object.assign({ users: [], msgs: [], dms: [], logs: [], cases: [], reqs: [], dmlog: [], emerg: {}, memo: {}, seq: 1 },
+const db = Object.assign({ users: [], msgs: [], dms: [], logs: [], cases: [], reqs: [], dmlog: [], emerg: {}, memo: {}, sched: [], stats: {}, seq: 1 },
   fs.existsSync(FILE) ? JSON.parse(fs.readFileSync(FILE, 'utf8')) : {});
 const save = () => fs.writeFileSync(FILE, JSON.stringify(db));
 const nid = () => db.seq++;
@@ -35,9 +35,10 @@ const isId = s => /^\d{15,22}$/.test(s || '');
 const pun = (t, m) => TYPES[t] + (t === 'timeout' ? `(${fmtMin(m)})` : '');
 
 // ---- Discord ----
-const bot = new Client({ intents: [G.Guilds, G.GuildMembers, G.DirectMessages, G.GuildVoiceStates], partials: [Partials.Channel, Partials.Message] });
+const bot = new Client({ intents: [G.Guilds, G.GuildMembers, G.DirectMessages, G.GuildVoiceStates, G.GuildMessages], partials: [Partials.Channel, Partials.Message] });
 bot.on(Events.MessageCreate, async m => {
-  if (m.guild || m.author.bot) return;
+  if (m.guild) { if (!m.author.bot && GIDS.includes(m.guild.id)) countMsg(m); return; }
+  if (m.author.bot) return;
   const gids = [];
   for (const g of GIDS) if (await bot.guilds.fetch(g).then(x => x.members.fetch(m.author.id)).catch(() => null)) gids.push(g);
   db.dms.unshift({ id: nid(), t: now(), uid: m.author.id, name: m.author.tag, text: m.content, gids, ts: Date.now() });
@@ -68,7 +69,7 @@ async function exec(by, type, uid, reason, min, notify, gid) {
 // ---- 画面部品 ----
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const KEYS = ['メニュー', '戻る', '保存', '更新', '開始', '終了', '承認', '却下', '照会', '発信', '予約', '保持', '解放'];
-const ACT = { メニュー: "location='/'", 戻る: 'history.back()', 更新: 'location.reload()', 終了: "location='/logout'", 照会: 'doLookup()', 発信: 'doSend()', 解放: 'doReset()' };
+const ACT = { メニュー: "location='/'", 戻る: 'history.back()', 更新: 'location.reload()', 終了: "location='/logout'", 照会: 'doLookup()', 発信: 'doSend()', 解放: 'doReset()', 予約: 'doSched()' };
 const BASE = ['メニュー', '戻る', '更新', '終了'], FORM = [...BASE, '照会', '発信', '解放'];
 const status = u => `<div class=st>係員 <span class=v>${esc(u.name)}</span> 権限区分 <span class=v>${ROLES[u.role]}</span> サーバー <form method=post action=/server><select name=gid onchange="this.form.submit()">${allowed(u).map(g => `<option value="${g}"${g === u.gid ? ' selected' : ''}>${esc(gname(g))}`).join('')}</select></form> 日時 <span class=v>${now()}</span> BOT <span class=v>${bot.isReady() ? `稼働中 ${bot.ws.ping}ms` : '停止中'}</span> 未読 <span class=v>${db.msgs.filter(m => m.to === u.name && !m.read && m.gid === u.gid).length} 件</span> <a class=b href=/inbox>管理者間通信</a> <a class=b href=/lock>端末ロック</a> <a class=b href=# onclick="dk();return false">ダークモード</a> <small id=ol>${online(u)}</small></div><div id=sa class="note alert" style="display:${staleItems(u).length ? 'block' : 'none'}">未対応のまま2時間以上放置されている案件が${staleItems(u).length}件あります</div>`;
 const page = (u, title, body, on = BASE, act = {}) => `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>管理システム端末</title><style>
@@ -93,6 +94,7 @@ function F(){return document.querySelector('form.main')}
 function doLookup(){var f=F(),i=f&&f.elements.uid;if(f&&f.method=='get')f.submit();else location='/history'+(i&&i.value?'?uid='+encodeURIComponent(i.value):'')}
 function doSend(){var f=F();if(f){f.requestSubmit?f.requestSubmit():f.submit()}}
 function doReset(){var f=F();if(f)f.reset()}
+function doSched(){var f=F();if(!f)return;if(!f.elements.when||!f.elements.when.value){alert('投稿日時を入力してください');return}f.action='/embed/schedule';f.requestSubmit?f.requestSubmit():f.submit()}
 function dk(){var d=document.documentElement.classList.toggle('dk');try{localStorage.setItem('dk',d?'1':'0')}catch(e){}}${u ? POLL : ''}</script>`;
 const note = t => t ? `<div class=note>${esc(t)}</div>` : '';
 const fs_ = (legend, inner) => `<fieldset><legend>${esc(legend)}</legend>${inner}</fieldset>`;
@@ -150,7 +152,7 @@ app.get('/', auth(), (req, res) => {
     Gp('処分業務(BAN・KICK・タイムアウト)', [T('/act/ban', 'BAN', 'ユーザー追放'), T('/act/kick', 'KICK', 'ユーザー退出'), T('/act/timeout', 'タイムアウト', '発言停止'), T('/act/warn', '警告', '警告記録'), T('/act/unban', 'BAN解除', '追放を解除'), T('/act/untimeout', 'タイムアウト解除', '発言停止を解除')]) +
     Gp('申請・承認', [T('/approve', '申請承認', `未対応 ${db.reqs.filter(r => r.gid === u.gid && r.status === '申請中' && !r.lock).length}件`, can(u, 'approve')), T('/myreqs', '自分の申請', '申請状況'), T('/logs', '操作ログ', '実行履歴'), T('/history', '処分履歴照会', 'アカウント別'), T('/staffstats', '稼働実績', 'スタッフ別集計', can(u, 'logsAll'))]) +
     Gp('通信業務', [T('/dms', 'DM受信', `未対応 ${db.dms.filter(d => visDm(u, d) && (d.st || 'todo') === 'todo').length}件`), T('/dm', 'DM送信', 'ユーザー宛DM'), T('/inbox', '管理者間通信', 'サイト内・メール'), T('/allmsgs', '全メッセージ管理', 'メッセージ削除', can(u, 'delMsg')), T('/summon', '緊急招集', 'Discordでメンション', can(u, 'direct'))]) +
-    Gp('サーバー管理', [T('/user', 'ユーザー情報', 'ID・ロール・警告'), T('/vc', 'VC管理', '参加者・切断・ミュート'), T('/invites', '招待リンク', '確認・破棄', can(u, 'direct')), T('/embed', '埋め込み投稿', 'Botから投稿', can(u, 'direct')), T('/emerg', '緊急対応', '封鎖・低速・ゲート', can(u, 'release'))]) +
+    Gp('サーバー管理', [T('/user', 'ユーザー情報', 'ID・ロール・警告'), T('/vc', 'VC管理', '参加者・切断・ミュート'), T('/invites', '招待リンク', '確認・破棄', can(u, 'direct')), T('/embed', '埋め込み・予約投稿', 'Botから投稿', can(u, 'direct')), T('/emerg', '緊急対応', '封鎖・低速・ゲート', can(u, 'release')), T('/bulkrole', 'ロール一括', '付与・剥奪', can(u, 'direct')), T('/stats', '統計', '参加・発言・ランキング')]) +
     Gp('設定業務', [T('/accounts', 'アカウント管理', '追加・削除', can(u, 'accounts')), T('/password', 'パスワード変更', '自分のパスワード')]), ['更新', '終了']));
 });
 
@@ -321,11 +323,12 @@ app.post('/role', auth('direct'), run(async (req, res) => {
 app.get('/embed', auth('direct'), run(async (req, res) => {
   const u = req.u, g = await G_(u); await g.channels.fetch();
   const opts = [...chans(g).values()].sort((a, b) => a.rawPosition - b.rawPosition).map(c => `<option value=${c.id}>#${esc(c.name)}`).join('');
-  res.send(page(u, '埋め込み投稿', fs_(`埋め込み投稿(${gname(u.gid)})`, `<form method=post class=main><label>チャンネル<select name=cid>${opts}</select></label><label>タイトル<input name=title maxlength=256 required></label><label>本文<textarea name=text rows=6 maxlength=4000 required></textarea></label><label>色<input type=color name=color value="#2a45b5"></label></form>`), FORM));
+  res.send(page(u, '埋め込み投稿', fs_(`埋め込み投稿(${gname(u.gid)})`, `<form method=post class=main><label>チャンネル<select name=cid>${opts}</select></label><label>タイトル<input name=title maxlength=256 required></label><label>本文<textarea name=text rows=6 maxlength=4000 required></textarea></label><label>色<input type=color name=color value="#2a45b5"></label><label>予約投稿の日時(日本時間。空欄なら今すぐ投稿)<input type=datetime-local name=when></label></form>`) + schedList(u), [...FORM, '予約']));
 }));
 app.post('/embed', auth('direct'), run(async (req, res) => {
   const u = req.u, { cid, title, text, color } = req.body, g = await G_(u), c = g.channels.cache.get(cid) || await g.channels.fetch(cid).catch(() => null);
   if (!c || ![0, 5].includes(c.type) || !title || !text || !/^#[0-9a-f]{6}$/i.test(color || '')) return bad(res, u, '入力が正しくありません');
+  if (req.body.when) return schedulePost(req, res, c);
   await c.send({ embeds: [new EmbedBuilder().setTitle(title.slice(0, 256)).setDescription(text.slice(0, 4000)).setColor(parseInt(color.slice(1), 16))] });
   log(u.name, '埋め込み投稿', c.id, title, u.gid); res.send(done(u, '埋め込み投稿', `#${c.name} に投稿しました`));
 }));
@@ -565,6 +568,95 @@ app.post('/api/appeal', async (req, res) => {
   if (!k || req.body.secret !== k) return res.status(403).send('NG');
   try { const m = await createAppeal(String(req.body.gid || ''), String(req.body.uid || '').trim(), String(req.body.text || '')); res.send(m ? 'NG: ' + m : 'OK'); } catch (e) { res.status(500).send('NG'); }
 });
+
+// ---- 第B回: 予約投稿・ロール一括付与/剥奪・統計 ----
+const schedList = u => {
+  const rows = db.sched.filter(x => x.gid === u.gid).sort((a, b) => b.at - a.at).slice(0, 30).map(x => tr([fmtD(x.at), esc('#' + x.cname), esc(x.title), esc(x.by), esc(x.status + (x.err ? `(${x.err})` : '')),
+    x.status === '待機' ? `<form method=post action=/embed/cancel style="display:inline"><input type=hidden name=id value=${x.id}><button>取消</button></form>` : '']));
+  return fs_('予約投稿の一覧', rows.length ? table(['投稿日時', 'チャンネル', 'タイトル', '登録者', '状態', '操作'], rows) : empty('予約はありません。'));
+};
+async function schedulePost(req, res, c) {
+  const u = req.u, { title, text, color, when } = req.body;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(when || '')) return bad(res, u, '日時の形式が正しくありません');
+  const at = Date.parse(when + ':00+09:00');
+  if (!(at > Date.now() + 3e4) || at > Date.now() + 366 * 864e5) return bad(res, u, '1年以内の、未来の日時を指定してください');
+  db.sched.push({ id: nid(), gid: u.gid, cid: c.id, cname: c.name, title: title.slice(0, 256), text: text.slice(0, 4000), color, at, by: u.name, status: '待機' }); save();
+  log(u.name, '予約投稿を登録', c.id, `${title}(${fmtD(at)})`, u.gid);
+  res.send(done(u, '予約投稿', `#${c.name} に、${fmtD(at)}(日本時間)の投稿を予約しました`));
+}
+app.post('/embed/schedule', auth('direct'), run(async (req, res) => {
+  const u = req.u, { cid, title, text, color } = req.body, g = await G_(u), c = g.channels.cache.get(cid) || await g.channels.fetch(cid).catch(() => null);
+  if (!c || ![0, 5].includes(c.type) || !title || !text || !/^#[0-9a-f]{6}$/i.test(color || '')) return bad(res, u, '入力が正しくありません');
+  return schedulePost(req, res, c);
+}));
+app.post('/embed/cancel', auth('direct'), (req, res) => {
+  const x = db.sched.find(y => y.id === +req.body.id && y.gid === req.u.gid && y.status === '待機');
+  if (x) { x.status = '取消'; save(); log(req.u.name, '予約投稿を取消', x.cid, x.title, x.gid); }
+  res.redirect('/embed');
+});
+async function runSched() {
+  for (const x of db.sched.filter(y => y.status === '待機' && y.at <= Date.now())) {
+    if (Date.now() - x.at > 3600e3) { x.status = '失敗'; x.err = '予定時刻を過ぎていたため送信しませんでした'; continue; }
+    x.status = '送信中';
+    try {
+      const g = await bot.guilds.fetch(x.gid), c = await g.channels.fetch(x.cid);
+      await c.send({ embeds: [new EmbedBuilder().setTitle(x.title).setDescription(x.text).setColor(parseInt(x.color.slice(1), 16))] });
+      x.status = '送信済'; log(x.by, '予約投稿を実行', x.cid, x.title, x.gid);
+    } catch (e) { x.status = '失敗'; x.err = e.message; }
+  }
+  db.sched = db.sched.filter(y => y.status === '待機' || y.status === '送信中' || Date.now() - y.at < 30 * 864e5);
+  save();
+}
+setInterval(() => runSched().catch(() => {}), 20000);
+
+app.get('/bulkrole', auth('direct'), run(async (req, res) => {
+  const u = req.u, g = await G_(u), q = String(req.query.q || '').trim(), from = String(req.query.from || '');
+  if (g.members.cache.size < g.memberCount) await g.members.fetch();
+  let ms = [];
+  if (isId(from)) ms = [...(g.roles.cache.get(from)?.members.values() || [])];
+  else if (q) { const ids = q.match(/\d{15,22}/g), lq = q.toLowerCase(); ms = ids ? ids.map(i => g.members.cache.get(i)).filter(Boolean) : [...g.members.cache.values()].filter(m => m.displayName.toLowerCase().includes(lq) || m.user.tag.toLowerCase().includes(lq)); }
+  ms = ms.filter(m => !m.user.bot).slice(0, 100);
+  const all = [...g.roles.cache.values()].filter(r => r.id !== g.id).sort((a, b) => b.position - a.position);
+  const given = all.filter(r => !r.managed && r.editable && (u.role === 'owner' || !isDangerous(r)));
+  const search = fs_(`メンバーを探す(${gname(u.gid)})`, `<form method=get class=main><label>名前、またはID(複数は改行やカンマ区切り)<input name=q value="${esc(q)}"></label><label>または、ロールで絞り込み<select name=from><option value="">指定しない${all.map(r => `<option value=${r.id}${r.id === from ? ' selected' : ''}>${esc(r.name)}`).join('')}</select></label></form>`);
+  const rows = ms.map(m => tr([`<input type=checkbox name=uid value=${m.id}>`, esc(m.displayName), esc(m.id), esc([...m.roles.cache.values()].filter(r => r.id !== g.id).map(r => r.name).slice(0, 6).join(', ') || 'なし')]));
+  const act = ms.length ? fs_(`選んだ人にロールを付与・剥奪(${ms.length}人を表示)`, `<form method=post onsubmit="return confirm('選んだ人にロールを操作します。よろしいですか?')">${table(['<input type=checkbox onclick="var c=this.checked;document.querySelectorAll(\'input[name=uid]\').forEach(function(x){x.checked=c})">', '表示名', 'ユーザーID', '所持ロール'], rows)}<br><label>ロール<select name=rid>${given.map(r => `<option value=${r.id}>${esc(r.name)}`).join('')}</select></label><button name=a value=add>付与</button> <button name=a value=remove>剥奪</button></form>`) : ((q || from) ? note('該当するメンバーがいません。') : '');
+  res.send(page(u, 'ロール一括', search + act, [...BASE, '照会']));
+}));
+app.post('/bulkrole', auth('direct'), run(async (req, res) => {
+  const u = req.u, uids = [].concat(req.body.uid || []).filter(isId).slice(0, 100), { rid, a } = req.body;
+  if (!uids.length || !isId(rid) || !['add', 'remove'].includes(a)) return bad(res, u, '対象の人とロールを選んでください');
+  const g = await G_(u), role = g.roles.cache.get(rid);
+  if (!role || role.managed || role.id === g.id || !role.editable) return bad(res, u, 'このロールは操作できません');
+  if (u.role !== 'owner' && isDangerous(role)) return bad(res, u, '危険な権限(管理者・サーバー管理・BANなど)を含むロールは最高管理者だけが操作できます');
+  let ok = 0; const errs = [];
+  for (const id of uids) {
+    try { const m = await g.members.fetch(id); if (a === 'add') await m.roles.add(role, `一括 by ${u.name}`); else await m.roles.remove(role, `一括 by ${u.name}`); ok++; }
+    catch (e) { errs.push(`${id}: ${e.message}`); }
+  }
+  log(u.name, a === 'add' ? 'ロール一括付与' : 'ロール一括剥奪', role.id, `${role.name} ${ok}/${uids.length}件`, u.gid);
+  res.send(done(u, 'ロール一括', `「${role.name}」を${a === 'add' ? '付与' : '剥奪'}しました。成功${ok}件 / 失敗${errs.length}件${errs.length ? '(' + errs.slice(0, 5).join(' / ') + ')' : ''}`));
+}));
+
+// 統計(件数だけを記録。メッセージの内容は保存しない)
+const dayStat = (gid, k = now().slice(0, 10)) => ((db.stats[gid] ??= {})[k] ??= { join: 0, leave: 0, ch: {}, au: {} });
+const countMsg = m => { const d = dayStat(m.guild.id); d.ch[m.channelId] = (d.ch[m.channelId] || 0) + 1; d.au[m.author.id] = 1; };
+bot.on(Events.GuildMemberAdd, m => { if (GIDS.includes(m.guild.id)) dayStat(m.guild.id).join++; });
+bot.on(Events.GuildMemberRemove, m => { if (GIDS.includes(m.guild.id)) dayStat(m.guild.id).leave++; });
+setInterval(() => { const lim = fmtD(Date.now() - 31 * 864e5).slice(0, 10); for (const g of Object.values(db.stats)) for (const k of Object.keys(g)) if (k < lim) delete g[k]; save(); }, 6e4);
+app.get('/stats', auth(), run(async (req, res) => {
+  const u = req.u, g = await G_(u), days = [1, 7, 30].includes(+req.query.days) ? +req.query.days : 7, st = db.stats[u.gid] || {};
+  const ds = Array.from({ length: days }, (_, i) => fmtD(Date.now() - i * 864e5).slice(0, 10)).map(k => [k, st[k] || { join: 0, leave: 0, ch: {}, au: {} }]);
+  const cnt = d => Object.values(d.ch).reduce((a, n) => a + n, 0), ch = {}, au = new Set();
+  ds.forEach(([, d]) => { for (const [c, n] of Object.entries(d.ch)) ch[c] = (ch[c] || 0) + n; Object.keys(d.au).forEach(x => au.add(x)); });
+  const members = g.memberCount || 0, total = ds.reduce((a, [, d]) => a + cnt(d), 0);
+  const sum = tr(['期間の参加人数', ds.reduce((a, [, d]) => a + d.join, 0)]) + tr(['期間の退出人数', ds.reduce((a, [, d]) => a + d.leave, 0)]) + tr(['メッセージ数', total]) + tr(['発言した人数', au.size]) + tr(['現在のメンバー数', members]) + tr(['アクティブ率(発言した人数 ÷ メンバー数)', members ? (au.size / members * 100).toFixed(1) + ' %' : '-']);
+  const rank = Object.entries(ch).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([c, n], i) => tr([i + 1, esc('#' + (g.channels.cache.get(c)?.name || c)), n]));
+  const sel = `<form method=get><label>期間<select name=days onchange="this.form.submit()">${[[1, '今日'], [7, '7日間'], [30, '30日間']].map(([d, l]) => `<option value=${d}${d === days ? ' selected' : ''}>${l}`).join('')}</select></label></form>`;
+  res.send(page(u, '統計', note('集計は、この機能を反映した時点から始まります。記録するのは件数だけで、メッセージの内容は保存しません。') + fs_(`サーバーの統計(${gname(u.gid)} / 直近${days}日)`, sel + table(['項目', '値'], [sum])) +
+    fs_('チャンネル別メッセージ数のランキング', rank.length ? table(['順位', 'チャンネル', 'メッセージ数'], rank) : empty('まだ記録がありません。')) +
+    fs_('日別', table(['日付', '参加', '退出', 'メッセージ数', '発言した人数'], ds.map(([k, d]) => tr([k, d.join, d.leave, cnt(d), Object.keys(d.au).length]))))));
+}));
 
 // ---- 全メッセージ管理(最高管理者のみ・他の人のメッセージも削除可) ----
 app.get('/allmsgs', auth('delMsg'), (req, res) => {
