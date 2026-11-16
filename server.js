@@ -78,7 +78,7 @@ body{margin:0;background:#d9d9d9;font:14px sans-serif;color:#111}
 h1{margin:0;background:linear-gradient(#2a45b5,#1a2f9a);color:#fff;text-align:center;font-weight:400;font-size:15px;letter-spacing:.2em;padding:13px 8px}
 .w{max-width:1000px;margin:0 auto;padding:10px}.tb{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px}
 button,a.b{font:inherit;background:#e4e4e4;border:2px outset #fff;padding:9px 16px;color:#111;text-decoration:none;cursor:pointer;display:inline-block}
-button:disabled{color:#999;background:#d2d2d2;cursor:default}button.on,a.cur{font-weight:700}
+button:disabled{color:#999;background:#d2d2d2;cursor:default}button.on,a.cur{font-weight:700}button,a.b,.tile{-webkit-tap-highlight-color:transparent;user-select:none}button:not(:disabled):active,a.b:active,.tile:not(.off):active{border-style:inset;background:#c4c4c4;transform:translate(1px,1px)}
 .st{margin:8px 0;display:flex;flex-wrap:wrap;gap:6px;align-items:center}.st select{width:auto;display:inline-block;margin:0}.st form{display:inline;margin:0}.v{display:inline-block;background:#f4f4f4;border:2px inset #fff;padding:7px 10px;white-space:nowrap}
 input,select,textarea{font:inherit;padding:7px;box-sizing:border-box;background:#f4f4f4;border:2px inset #fff}
 form input:not([type=checkbox]),form select,form textarea{width:100%;max-width:600px;display:block;margin:4px 0 12px}
@@ -88,13 +88,17 @@ table{width:100%;border-collapse:collapse;background:#f4f4f4}td,th{border:1px so
 .g{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px}
 .tile{display:block;background:#e4e4e4;border:2px outset #fff;padding:12px 8px;text-align:center;color:#111;text-decoration:none;min-height:48px}
 .tile small{display:block;margin-top:6px;background:#eee;border:1px solid #999;padding:2px;font-size:12px}.tile.off{background:#d0d0d0;border:2px solid #ccc}
-html.dk{filter:invert(1) hue-rotate(180deg)}</style><script>try{if(localStorage.getItem('dk')==='1')document.documentElement.classList.add('dk')}catch(e){}</script><h1>管理システム端末(version 5.0.0) ${esc(title)}</h1><div class=w>
+button,a.b,.tile{-webkit-tap-highlight-color:transparent;touch-action:manipulation;user-select:none}button:active:not(:disabled),a.b:active{border-style:inset;background:#c4c4c4;padding:11px 16px 7px}.tile:not(.off):active{border-style:inset;background:#c4c4c4;padding:14px 8px 10px}a.cur{border-style:inset;background:#cfcfcf}button:disabled[data-t]{border-style:inset;color:#555}html.dk{filter:invert(1) hue-rotate(180deg)}</style><script>try{if(localStorage.getItem('dk')==='1')document.documentElement.classList.add('dk')}catch(e){}</script><h1>管理システム端末 ${esc(title)}</h1><div class=w>
 <div class=tb>${KEYS.map(k => on.includes(k) ? `<button type=button class=on onclick="${act[k] || ACT[k]}">${k}</button>` : `<button disabled>${k}</button>`).join('')}</div>
 ${u ? status(u) + '<div id=nb class=note style="display:none"><a href=/inbox>管理者間通信に新着メッセージがあります</a></div>' : ''}${body}</div><script>
 function F(){return document.querySelector('form.main')}
 function doLookup(){var f=F(),i=f&&f.elements.uid;if(f&&f.method=='get')f.submit();else location='/history'+(i&&i.value?'?uid='+encodeURIComponent(i.value):'')}
 function doSend(){var f=F();if(f){f.requestSubmit?f.requestSubmit():f.submit()}}
 function doReset(){var f=F();if(f)f.reset()}
+document.addEventListener('touchstart',function(){},true);
+document.addEventListener('touchstart',function(){},{passive:true});
+document.addEventListener('submit',function(e){if(e.defaultPrevented)return;var b=e.submitter;if(b&&b.tagName==='BUTTON'&&!b.dataset.t){setTimeout(function(){b.dataset.t=b.textContent;b.textContent='処理中…';b.disabled=true},0)}},false);
+window.addEventListener('pageshow',function(){document.querySelectorAll('button[data-t]').forEach(function(b){b.disabled=false;b.textContent=b.dataset.t;delete b.dataset.t})});
 function doSched(){var f=F();if(!f)return;if(!f.elements.when||!f.elements.when.value){alert('投稿日時を入力してください');return}f.action='/embed/schedule';f.requestSubmit?f.requestSubmit():f.submit()}
 function dk(){var d=document.documentElement.classList.toggle('dk');try{localStorage.setItem('dk',d?'1':'0')}catch(e){}}${u ? POLL : ''}</script>`;
 const note = t => t ? `<div class=note>${esc(t)}</div>` : '';
