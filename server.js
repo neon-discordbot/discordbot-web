@@ -10,7 +10,7 @@ if (!SESSION_SECRET || !OWNER_PASS) { console.error('SESSION_SECRET と OWNER_PA
 // ---- 保存(JSONファイル) ----
 const FILE = 'data/db.json';
 fs.mkdirSync('data', { recursive: true });
-const db = Object.assign({ users: [], msgs: [], dms: [], logs: [], cases: [], reqs: [], dmlog: [], emerg: {}, memo: {}, sched: [], stats: {}, seq: 1 },
+const db = Object.assign({ users: [], msgs: [], dms: [], logs: [], cases: [], reqs: [], dmlog: [], emerg: {}, memo: {}, sched: [], stats: {}, watch: {}, cfg: {}, alerts: [], vclog: [], snaps: [], devreq: [], seq: 1 },
   fs.existsSync(FILE) ? JSON.parse(fs.readFileSync(FILE, 'utf8')) : {});
 const save = () => fs.writeFileSync(FILE, JSON.stringify(db));
 const nid = () => db.seq++;
@@ -35,7 +35,7 @@ const isId = s => /^\d{15,22}$/.test(s || '');
 const pun = (t, m) => TYPES[t] + (t === 'timeout' ? `(${fmtMin(m)})` : '');
 
 // ---- Discord ----
-const bot = new Client({ intents: [G.Guilds, G.GuildMembers, G.DirectMessages, G.GuildVoiceStates, G.GuildMessages], partials: [Partials.Channel, Partials.Message] });
+const bot = new Client({ intents: [G.Guilds, G.GuildMembers, G.DirectMessages, G.GuildVoiceStates, G.GuildMessages, G.GuildInvites], partials: [Partials.Channel, Partials.Message] });
 bot.on(Events.MessageCreate, async m => {
   if (m.guild) { if (!m.author.bot && GIDS.includes(m.guild.id)) countMsg(m); return; }
   if (m.author.bot) return;
@@ -64,6 +64,7 @@ async function exec(by, type, uid, reason, min, notify, gid) {
   }
   db.cases.unshift({ id: nid(), t: now(), type, uid, reason, min, by, gid }); save();
   log(by, pun(type, min), uid, reason, gid);
+  if (type === 'ban') freezeCheck(by, 'ban', 3, '1分間に3人以上をBANしました', gid);
 }
 
 // ---- 画面部品 ----
@@ -71,7 +72,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const KEYS = ['メニュー', '戻る', '保存', '更新', '開始', '終了', '承認', '却下', '照会', '発信', '予約', '保持', '解放'];
 const ACT = { メニュー: "location='/'", 戻る: 'history.back()', 更新: 'location.reload()', 終了: "location='/logout'", 照会: 'doLookup()', 発信: 'doSend()', 解放: 'doReset()', 予約: 'doSched()' };
 const BASE = ['メニュー', '戻る', '更新', '終了'], FORM = [...BASE, '照会', '発信', '解放'];
-const status = u => `<div class=st>係員 <span class=v>${esc(u.name)}</span> 権限区分 <span class=v>${ROLES[u.role]}</span> サーバー <form method=post action=/server><select name=gid onchange="this.form.submit()">${allowed(u).map(g => `<option value="${g}"${g === u.gid ? ' selected' : ''}>${esc(gname(g))}`).join('')}</select></form> 日時 <span class=v>${now()}</span> BOT <span class=v>${bot.isReady() ? `稼働中 ${bot.ws.ping}ms` : '停止中'}</span> 未読 <span class=v>${db.msgs.filter(m => m.to === u.name && !m.read && m.gid === u.gid).length} 件</span> <a class=b href=/inbox>管理者間通信</a> <a class=b href=/lock>端末ロック</a> <a class=b href=# onclick="dk();return false">ダークモード</a> <small id=ol>${online(u)}</small></div><div id=sa class="note alert" style="display:${staleItems(u).length ? 'block' : 'none'}">未対応のまま2時間以上放置されている案件が${staleItems(u).length}件あります</div>`;
+const status = u => `<div class=st>係員 <span class=v>${esc(u.name)}</span> 権限区分 <span class=v>${ROLES[u.role]}</span> サーバー <form method=post action=/server><select name=gid onchange="this.form.submit()">${allowed(u).map(g => `<option value="${g}"${g === u.gid ? ' selected' : ''}>${esc(gname(g))}`).join('')}</select></form> 日時 <span class=v>${now()}</span> BOT <span class=v>${bot.isReady() ? `稼働中 ${bot.ws.ping}ms` : '停止中'}</span> 未読 <span class=v>${db.msgs.filter(m => m.to === u.name && !m.read && m.gid === u.gid).length} 件</span> <a class=b href=/inbox>管理者間通信</a> <a class=b href=/lock>端末ロック</a> <a class=b href=# onclick="dk();return false">ダークモード</a> <small id=ol>${online(u)}</small></div><div id=sa class="note alert" style="display:${staleItems(u).length ? 'block' : 'none'}">未対応のまま2時間以上放置されている案件が${staleItems(u).length}件あります</div><div id=sb class="note alert" style="display:${unack(u) ? 'block' : 'none'}"><a href=/alerts>警告アラートが<span id=sbn>${unack(u)}</span>件あります(確認する)</a></div>`;
 const page = (u, title, body, on = BASE, act = {}) => `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>管理システム端末</title><style>
 body{margin:0;background:#d9d9d9;font:14px sans-serif;color:#111}
 h1{margin:0;background:linear-gradient(#2a45b5,#1a2f9a);color:#fff;text-align:center;font-weight:400;font-size:15px;letter-spacing:.2em;padding:13px 8px}
@@ -112,6 +113,7 @@ app.use(session({ secret: SESSION_SECRET, resave: false, saveUninitialized: fals
 const auth = perm => (req, res, next) => {
   const u0 = db.users.find(x => x.id === req.session.uid);
   if (!u0) return res.redirect('/login');
+  if (u0.frozen) return req.session.destroy(() => res.status(403).send(loginPage('このアカウントは凍結されています。最高管理者に連絡してください')));
   const al = allowed(u0), u = { ...u0, gid: al.includes(req.session.gid) ? req.session.gid : al[0] };
   seen.set(u.id, { ...(seen.get(u.id) || {}), name: u.name, ts: Date.now(), gid: u.gid });
   if (req.session.locked && req.path !== '/unlock') return res.send(lockPage(u));
@@ -130,6 +132,8 @@ app.post('/login', async (req, res) => {
   const u = db.users.find(x => x.name === req.body.name);
   if (u && bcrypt.compareSync(req.body.pass || '', u.hash)) {
     delete fails[req.ip];
+    if (u.frozen) return res.status(403).send(loginPage('このアカウントは凍結されています。最高管理者に連絡してください'));
+    const dv = deviceBlock(req, res, u); if (dv) return res.status(403).send(loginPage(dv));
     if (needMfa(u)) { try { await sendCode(req, u); return res.redirect('/login/code'); } catch (e) { log(u.name, '2段階認証メール送信失敗', '', e.message); return res.status(500).send(loginPage('確認メールを送信できませんでした。最高管理者に連絡してください。')); } }
     return req.session.regenerate(() => { req.session.uid = u.id; log(u.name, 'ログイン'); res.redirect('/'); });
   }
@@ -152,7 +156,7 @@ app.get('/', auth(), (req, res) => {
     Gp('処分業務(BAN・KICK・タイムアウト)', [T('/act/ban', 'BAN', 'ユーザー追放'), T('/act/kick', 'KICK', 'ユーザー退出'), T('/act/timeout', 'タイムアウト', '発言停止'), T('/act/warn', '警告', '警告記録'), T('/act/unban', 'BAN解除', '追放を解除'), T('/act/untimeout', 'タイムアウト解除', '発言停止を解除')]) +
     Gp('申請・承認', [T('/approve', '申請承認', `未対応 ${db.reqs.filter(r => r.gid === u.gid && r.status === '申請中' && !r.lock).length}件`, can(u, 'approve')), T('/myreqs', '自分の申請', '申請状況'), T('/logs', '操作ログ', '実行履歴'), T('/history', '処分履歴照会', 'アカウント別'), T('/staffstats', '稼働実績', 'スタッフ別集計', can(u, 'logsAll'))]) +
     Gp('通信業務', [T('/dms', 'DM受信', `未対応 ${db.dms.filter(d => visDm(u, d) && (d.st || 'todo') === 'todo').length}件`), T('/dm', 'DM送信', 'ユーザー宛DM'), T('/inbox', '管理者間通信', 'サイト内・メール'), T('/allmsgs', '全メッセージ管理', 'メッセージ削除', can(u, 'delMsg')), T('/summon', '緊急招集', 'Discordでメンション', can(u, 'direct'))]) +
-    Gp('サーバー管理', [T('/user', 'ユーザー情報', 'ID・ロール・警告'), T('/vc', 'VC管理', '参加者・切断・ミュート'), T('/invites', '招待リンク', '確認・破棄', can(u, 'direct')), T('/embed', '埋め込み・予約投稿', 'Botから投稿', can(u, 'direct')), T('/emerg', '緊急対応', '封鎖・低速・ゲート', can(u, 'release')), T('/bulkrole', 'ロール一括', '付与・剥奪', can(u, 'direct')), T('/stats', '統計', '参加・発言・ランキング')]) +
+    Gp('サーバー管理', [T('/user', 'ユーザー情報', 'ID・ロール・警告'), T('/vc', 'VC管理', '参加者・切断・ミュート'), T('/invites', '招待リンク', '確認・破棄', can(u, 'direct')), T('/embed', '埋め込み・予約投稿', 'Botから投稿', can(u, 'direct')), T('/emerg', '緊急対応', '封鎖・低速・ゲート', can(u, 'release')), T('/bulkrole', 'ロール一括', '付与・剥奪', can(u, 'direct')), T('/stats', '統計', '参加・発言・ランキング'), T('/watch', '要監視', '怪しいユーザー', can(u, 'direct')), T('/alerts', '警告アラート', `未確認 ${unack(u)}件`), T('/guard', '荒らし対策', '新規アカウント・レイド', can(u, 'direct')), T('/vclog', 'VC履歴', '入退室・切断', true), T('/snap', 'バックアップ', '保存・復元', can(u, 'release'))]) +
     Gp('設定業務', [T('/accounts', 'アカウント管理', '追加・削除', can(u, 'accounts')), T('/password', 'パスワード変更', '自分のパスワード')]), ['更新', '終了']));
 });
 
@@ -345,8 +349,9 @@ app.post('/vc/act', auth(), run(async (req, res) => {
   if (!isId(uid) || !['disconnect', 'mute', 'unmute'].includes(a)) return bad(res, u, '入力が正しくありません');
   const g = await G_(u), m = await g.members.fetch(uid);
   if (!m.voice.channel) return bad(res, u, 'この人は今VCにいません');
-  if (a === 'disconnect') await m.voice.disconnect(`by ${u.name}`); else await m.voice.setMute(a === 'mute', `by ${u.name}`);
-  log(u.name, { disconnect: 'VC切断', mute: 'VCミュート', unmute: 'VCミュート解除' }[a], uid, '', u.gid); res.redirect('/vc');
+  if (a === 'disconnect') { panelVc[`${u.gid}:${uid}`] = { ts: Date.now(), by: u.name }; await m.voice.disconnect(`by ${u.name}`); } else await m.voice.setMute(a === 'mute', `by ${u.name}`);
+  log(u.name, { disconnect: 'VC切断', mute: 'VCミュート', unmute: 'VCミュート解除' }[a], uid, '', u.gid);
+  if (a !== 'disconnect') db.vclog.unshift({ ts: Date.now(), t: now(), gid: u.gid, uid, name: m.displayName, kind: a === 'mute' ? 'ミュート' : 'ミュート解除', from: m.voice.channel ? m.voice.channel.name : '', to: '', note: `${u.name}が管理画面から` }); res.redirect('/vc');
 }));
 
 // 招待リンクの確認と破棄
@@ -415,9 +420,9 @@ const pwOk = (u, req) => bcrypt.compareSync(req.body.pw || '', u.hash);
 const lockPage = (u, t) => page(null, '端末ロック', fs_(`端末ロック中(${u.name})`, `${note(t)}<form method=post action=/unlock><label>パスワード<input name=pass type=password autocomplete=current-password></label><button>ロック解除</button></form><a class=b href=/logout>ログアウト</a>`), []);
 const stLabel = d => d.st === 'doing' ? `${d.by}が対応中(ロック)` : d.st === 'done' ? `完了(${d.by})` : '未対応';
 const memoBox = u => { const m = db.memo[u.gid]; return `<div class=note style="font-weight:700">${m && m.text ? esc(m.text) : '(共有メモはありません)'}${m ? `<br><small>更新: ${esc(m.by)} ${esc(m.at)}</small>` : ''}</div><form method=post action=/memo><input name=text maxlength=200 value="${esc(m ? m.text : '')}" placeholder="全体共有メモ(例:【警戒】スパムURL荒らし発生中 / ○○さんは22時まで対応可)"><button>メモを保存</button></form>`; };
-const POLL = "var N=null;function beep(){try{var a=new (window.AudioContext||window.webkitAudioContext)(),o=a.createOscillator();o.connect(a.destination);o.frequency.value=880;o.start();setTimeout(function(){o.stop()},250)}catch(e){}}function poll(){fetch('/api/unread').then(function(r){return r.json()}).then(function(j){if(N!==null&&j.n>N){beep();document.title='(新着) 管理システム端末';var b=document.getElementById('nb');if(b)b.style.display='block'}var o=document.getElementById('ol');if(o&&j.ol)o.textContent=j.ol;var s=document.getElementById('sa');if(s){s.style.display=j.stale>0?'block':'none';s.textContent='未対応のまま2時間以上放置されている案件が'+j.stale+'件あります'}N=j.n}).catch(function(){})}setInterval(poll,15000);poll();";
+const POLL = "var N=null;function beep(){try{var a=new (window.AudioContext||window.webkitAudioContext)(),o=a.createOscillator();o.connect(a.destination);o.frequency.value=880;o.start();setTimeout(function(){o.stop()},250)}catch(e){}}function poll(){fetch('/api/unread').then(function(r){return r.json()}).then(function(j){if(N!==null&&j.n>N){beep();document.title='(新着) 管理システム端末';var b=document.getElementById('nb');if(b)b.style.display='block'}var o=document.getElementById('ol');if(o&&j.ol)o.textContent=j.ol;var s=document.getElementById('sa');if(s){s.style.display=j.stale>0?'block':'none';s.textContent='未対応のまま2時間以上放置されている案件が'+j.stale+'件あります'}var b=document.getElementById('sb');if(b){b.style.display=j.alerts>0?'block':'none';var q=document.getElementById('sbn');if(q)q.textContent=j.alerts}N=j.n}).catch(function(){})}setInterval(poll,15000);poll();";
 
-app.get('/api/unread', auth(), (req, res) => res.json({ n: db.msgs.filter(m => m.to === req.u.name && !m.read && m.gid === req.u.gid).length, ol: onlineText(req.u), stale: staleItems(req.u).length }));
+app.get('/api/unread', auth(), (req, res) => res.json({ n: db.msgs.filter(m => m.to === req.u.name && !m.read && m.gid === req.u.gid).length, ol: onlineText(req.u), stale: staleItems(req.u).length, alerts: unack(req.u) }));
 app.get('/lock', auth(), (req, res) => { const s = seen.get(req.u.id); if (s) s.away = true; req.session.locked = true; log(req.u.name, '端末ロック', '', '', req.u.gid); res.redirect('/'); });
 app.post('/unlock', auth(), (req, res) => {
   if (!bcrypt.compareSync(req.body.pass || '', req.u.hash)) {
@@ -640,8 +645,8 @@ app.post('/bulkrole', auth('direct'), run(async (req, res) => {
 
 // 統計(件数だけを記録。メッセージの内容は保存しない)
 const dayStat = (gid, k = now().slice(0, 10)) => ((db.stats[gid] ??= {})[k] ??= { join: 0, leave: 0, ch: {}, au: {} });
-const countMsg = m => { const d = dayStat(m.guild.id); d.ch[m.channelId] = (d.ch[m.channelId] || 0) + 1; d.au[m.author.id] = 1; };
-bot.on(Events.GuildMemberAdd, m => { if (GIDS.includes(m.guild.id)) dayStat(m.guild.id).join++; });
+const countMsg = m => { const d = dayStat(m.guild.id); d.ch[m.channelId] = (d.ch[m.channelId] || 0) + 1; d.au[m.author.id] = 1; watchHit(m.guild.id, m.author.id, `発言(#${m.channel ? m.channel.name : m.channelId})`); };
+bot.on(Events.GuildMemberAdd, m => { if (!GIDS.includes(m.guild.id)) return; dayStat(m.guild.id).join++; onJoin(m).catch(() => {}); });
 bot.on(Events.GuildMemberRemove, m => { if (GIDS.includes(m.guild.id)) dayStat(m.guild.id).leave++; });
 setInterval(() => { const lim = fmtD(Date.now() - 31 * 864e5).slice(0, 10); for (const g of Object.values(db.stats)) for (const k of Object.keys(g)) if (k < lim) delete g[k]; save(); }, 6e4);
 app.get('/stats', auth(), run(async (req, res) => {
@@ -657,6 +662,201 @@ app.get('/stats', auth(), run(async (req, res) => {
     fs_('チャンネル別メッセージ数のランキング', rank.length ? table(['順位', 'チャンネル', 'メッセージ数'], rank) : empty('まだ記録がありません。')) +
     fs_('日別', table(['日付', '参加', '退出', 'メッセージ数', '発言した人数'], ds.map(([k, d]) => tr([k, d.join, d.leave, cnt(d), Object.keys(d.au).length]))))));
 }));
+
+// ---- 第C回・第D回: 警告アラート・要監視・荒らし対策・VC履歴・自動凍結・バックアップ・端末承認 ----
+const unack = u => db.alerts.filter(a => a.gid === u.gid && !a.ack).length;
+const rl = {}, once = (k, ms = 6e4) => { if (rl[k] && Date.now() - rl[k] < ms) return false; rl[k] = Date.now(); return true; };
+function alertStaff(gid, kind, uid, text) {
+  db.alerts.unshift({ id: nid(), gid, t: now(), kind, uid, text, ack: false }); db.alerts = db.alerts.slice(0, 500);
+  const t = now(); db.users.filter(x => allowed(x).includes(gid)).forEach(x => db.msgs.unshift({ id: nid(), t, from: 'システム', to: x.name, subject: `【${kind}】`, text, read: false, gid }));
+  const ch = (db.cfg[gid] || {}).alertChan;
+  if (ch) bot.guilds.fetch(gid).then(g => g.channels.fetch(ch)).then(c => c.send(`🚨 【${kind}】${text}`)).catch(() => {});
+  save();
+}
+const watchHit = (gid, uid, what) => { const w = (db.watch[gid] || {})[uid]; if (w && once(`${gid}:${uid}:${what.slice(0, 4)}`)) alertStaff(gid, '要監視ユーザー', uid, `${what}(メモ: ${w.note || '-'})`); };
+
+// 参加時: 新規アカウント対策・レイド検知・同じ招待リンクからの連続参加・酷似アカウント
+const joins = {}, invCache = {}, panelVc = {};
+const norm = x => String(x).toLowerCase().replace(/[^a-z0-9\u3040-\u30ff\u4e00-\u9fff]/g, '');
+const lev = (a, b) => { const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]); for (let j = 1; j <= b.length; j++) d[0][j] = j; for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); return d[a.length][b.length]; };
+const alike = (x, y) => { const a = norm(x.username), b = norm(y.username); return (a.length >= 4 && b.length >= 4 && 1 - lev(a, b) / Math.max(a.length, b.length) >= 0.8) || (!!x.avatar && x.avatar === y.avatar); };
+async function snapInvites(g) { try { const inv = await g.invites.fetch(); invCache[g.id] = new Map(inv.map(i => [i.code, i.uses || 0])); return inv; } catch (e) { return null; } }
+bot.on(Events.ClientReady, async () => { for (const gid of GIDS) { const g = await bot.guilds.fetch(gid).catch(() => null); if (g) await snapInvites(g); } });
+async function onJoin(m) {
+  const gid = m.guild.id, c = db.cfg[gid] || {}, t0 = Date.now();
+  watchHit(gid, m.id, '参加');
+  if (c.minAge > 0 && t0 - m.user.createdTimestamp < c.minAge * 864e5) {
+    const age = ((t0 - m.user.createdTimestamp) / 864e5).toFixed(1), kick = c.ageAction === 'kick';
+    try { if (kick) await m.kick(`新規アカウント(${age}日)`); else if (c.qRole) await m.roles.add(c.qRole, '新規アカウント'); } catch (e) {}
+    alertStaff(gid, '新規アカウント', m.id, `${m.user.tag} は、アカウント作成から${age}日です(${kick ? 'キックしました' : c.qRole ? '隔離ロールを付与しました' : '対応は未設定です'})`);
+  }
+  const arr = (joins[gid] ??= []); arr.push({ ts: t0, id: m.id, u: m.user, code: null }); while (arr.length && t0 - arr[0].ts > 3600e3) arr.shift();
+  if (c.raidN > 0 && arr.filter(x => t0 - x.ts < (c.raidSec || 60) * 1000).length >= c.raidN && once(`raid:${gid}`, 5 * 6e4)) {
+    try { await m.guild.disableInvites(true); (db.emerg[gid] ??= {}).gate = { at: now(), by: 'システム(レイド検知)' }; } catch (e) {}
+    alertStaff(gid, 'レイド検知', m.id, `${c.raidSec || 60}秒以内に${c.raidN}人以上が参加したため、招待リンクを一時停止しました。解除は最高管理者の「緊急対応」から行ってください`);
+  }
+  const before = invCache[gid], inv = await snapInvites(m.guild);
+  if (before && inv) {
+    const used = inv.find(i => (i.uses || 0) > (before.get(i.code) || 0));
+    if (used) { arr[arr.length - 1].code = used.code; const same = arr.filter(x => x.code === used.code && t0 - x.ts < 10 * 6e4); if (same.length >= 3 && once(`inv:${gid}:${used.code}`, 10 * 6e4)) alertStaff(gid, '同じ招待リンクから連続参加', m.id, `招待コード ${used.code}(作成者: ${used.inviter ? used.inviter.tag : '不明'})から、10分以内に${same.length}人が参加しました`); }
+  }
+  const sims = arr.filter(x => x.id !== m.id && alike(m.user, x.u));
+  if (sims.length >= 2 && once(`sim:${gid}:${norm(m.user.username)}`, 10 * 6e4)) alertStaff(gid, '酷似アカウント', m.id, `${m.user.tag} と、名前またはアイコンが酷似したアカウントが、1時間以内に${sims.length}人参加しています(${sims.map(x => x.u.tag).slice(0, 5).join(', ')})`);
+}
+bot.on(Events.GuildMemberUpdate, (o, n) => { try { if (GIDS.includes(n.guild.id) && o.displayName !== n.displayName) watchHit(n.guild.id, n.id, `名前変更: ${o.displayName} → ${n.displayName}`); } catch (e) {} });
+
+// VC履歴(入室・退出・移動・切断)
+bot.on(Events.VoiceStateUpdate, async (o, n) => {
+  const gid = n.guild.id; if (!GIDS.includes(gid)) return;
+  const uid = n.id, name = n.member ? n.member.displayName : uid;
+  const kind = !o.channelId && n.channelId ? '入室' : o.channelId && !n.channelId ? '退出' : o.channelId && n.channelId && o.channelId !== n.channelId ? '移動' : null;
+  if (!kind) return;
+  let note = '';
+  if (kind !== '入室') {
+    const p = panelVc[`${gid}:${uid}`];
+    if (p && Date.now() - p.ts < 5000) note = `${p.by}が管理画面から切断`;
+    else try { const e = (await n.guild.fetchAuditLogs({ type: kind === '退出' ? 27 : 26, limit: 1 })).entries.first(); if (e && Date.now() - e.createdTimestamp < 3000 && e.executorId !== uid) note = `${e.executor ? e.executor.tag : e.executorId}が実行した可能性があります`; } catch (e) {}
+  }
+  db.vclog.unshift({ ts: Date.now(), t: now(), gid, uid, name, kind, from: o.channel ? o.channel.name : '', to: n.channel ? n.channel.name : '', note }); db.vclog = db.vclog.slice(0, 2000);
+  if (kind !== '退出') watchHit(gid, uid, `VC${kind}(${n.channel ? n.channel.name : ''})`);
+});
+
+// スタッフの異常操作の自動凍結(最高管理者は対象外)
+const acts = {};
+function freezeCheck(name, kind, limit, reason, gid) {
+  const a = (acts[`${name}:${kind}`] ??= []); a.push(Date.now()); while (a.length && Date.now() - a[0] > 60e3) a.shift();
+  const u = db.users.find(x => x.name === name);
+  if (!u || u.role === 'owner' || u.frozen || a.length < limit) return;
+  u.frozen = { at: now(), reason }; save(); log('システム', 'アカウント凍結', name, reason, gid);
+  const t = now(); db.users.filter(x => x.role === 'owner').forEach(x => db.msgs.unshift({ id: nid(), t, from: 'システム', to: x.name, subject: '【アカウント凍結】', text: `${name} のアカウントを自動で凍結しました(${reason})。アカウント管理から解除できます。`, read: false, gid }));
+  alertStaff(gid, 'アカウント凍結', '', `${name} を凍結しました(${reason})`);
+}
+const auditBy = async (guild, type) => { try { const e = (await guild.fetchAuditLogs({ type, limit: 1 })).entries.first(); return e && Date.now() - e.createdTimestamp < 5000 ? e.executorId : null; } catch (e) { return null; } };
+const staffOf = id => id && db.users.find(x => x.discordId === id);
+const chanEvt = async c => { if (!c.guild || !GIDS.includes(c.guild.id)) return; const s = staffOf(await auditBy(c.guild, 12)) || staffOf(await auditBy(c.guild, 11)); if (s) freezeCheck(s.name, 'chan', 3, '短時間に複数のチャンネルを削除・変更しました', c.guild.id); };
+bot.on(Events.ChannelDelete, chanEvt);
+bot.on(Events.ChannelUpdate, (o, c) => chanEvt(c));
+bot.on(Events.GuildBanAdd, async b => { if (!GIDS.includes(b.guild.id)) return; const s = staffOf(await auditBy(b.guild, 22)); if (s) freezeCheck(s.name, 'ban', 3, '1分間に3人以上をBANしました', b.guild.id); });
+app.post('/accounts/unfreeze', auth('accounts'), (req, res) => {
+  const t = db.users.find(x => x.id === +req.body.id);
+  if (t && t.frozen) { delete t.frozen; Object.keys(acts).filter(k => k.startsWith(t.name + ':')).forEach(k => delete acts[k]); save(); log(req.u.name, '凍結解除', t.name); }
+  res.redirect('/accounts');
+});
+
+// 警告アラート・要監視・荒らし対策設定・VC履歴
+app.get('/alerts', auth(), (req, res) => {
+  const rows = db.alerts.filter(a => a.gid === req.u.gid).slice(0, 100).map(a => tr([esc(a.t), esc(a.kind), esc(a.uid || '-'), esc(a.text), a.ack ? '確認済み' : `<form method=post action=/alerts/ack style="display:inline"><input type=hidden name=id value=${a.id}><button>確認済みにする</button></form>`]));
+  res.send(page(req.u, '警告アラート', fs_(`警告アラート(${gname(req.u.gid)})`, `<form method=post action=/alerts/ack><input type=hidden name=id value=all><button>すべて確認済みにする</button></form>` + (rows.length ? table(['日時', '種類', 'ユーザーID', '内容', '状態'], rows) : empty('アラートはありません。')))));
+});
+app.post('/alerts/ack', auth(), (req, res) => { db.alerts.filter(a => a.gid === req.u.gid && (req.body.id === 'all' || a.id === +req.body.id)).forEach(a => { a.ack = true; }); save(); res.redirect('/alerts'); });
+app.get('/watch', auth('direct'), (req, res) => {
+  const rows = Object.entries(db.watch[req.u.gid] || {}).map(([id, v]) => tr([esc(id), esc(v.note || '-'), esc(v.by), esc(v.at), `<form method=post action=/watch/del style="display:inline"><input type=hidden name=uid value=${id}><button>解除</button></form>`]));
+  res.send(page(req.u, '要監視ユーザー', fs_(`要監視ユーザーの登録(${gname(req.u.gid)})`, `<form method=post class=main><label>ユーザーID<input name=uid required pattern="\\d{15,22}" inputmode=numeric></label><label>メモ(理由)<input name=note maxlength=100></label></form>${note('登録した人が、参加・発言・VC入室・名前変更をすると、警告アラートが出ます(同じ種類は1分に1回)。')}`) + fs_('登録中のユーザー', rows.length ? table(['ユーザーID', 'メモ', '登録者', '登録日時', '操作'], rows) : empty('登録はありません。')), FORM));
+});
+app.post('/watch', auth('direct'), (req, res) => {
+  const { uid, note: nt } = req.body; if (!isId(uid) || !req.u.gid) return bad(res, req.u, '入力が正しくありません');
+  (db.watch[req.u.gid] ??= {})[uid] = { note: String(nt || '').slice(0, 100), by: req.u.name, at: now() }; save(); log(req.u.name, '要監視に登録', uid, nt, req.u.gid); res.redirect('/watch');
+});
+app.post('/watch/del', auth('direct'), (req, res) => { if (db.watch[req.u.gid]) delete db.watch[req.u.gid][req.body.uid]; save(); log(req.u.name, '要監視を解除', req.body.uid, '', req.u.gid); res.redirect('/watch'); });
+app.get('/guard', auth('direct'), run(async (req, res) => {
+  const u = req.u, g = await G_(u), c = db.cfg[u.gid] || {}, own = can(u, 'release'); await g.channels.fetch();
+  const ro = [...g.roles.cache.values()].filter(r => r.id !== g.id && !r.managed).sort((a, b) => b.position - a.position).map(r => `<option value=${r.id}${r.id === c.qRole ? ' selected' : ''}>${esc(r.name)}`).join('');
+  const co = [...chans(g).values()].map(x => `<option value=${x.id}${x.id === c.alertChan ? ' selected' : ''}>#${esc(x.name)}`).join('');
+  res.send(page(u, '荒らし対策', fs_(`荒らし対策の設定(${gname(u.gid)})`, (own ? note('変更はすぐに反映されます。') : note('変更できるのは最高管理者だけです。')) +
+    `<form method=post class=main><label>アカウント作成から何日未満を対象にするか(0で無効)<input name=minAge type=number min=0 max=365 value=${+c.minAge || 0}></label><label>対象アカウントの処理<select name=ageAction><option value=role${c.ageAction !== 'kick' ? ' selected' : ''}>隔離ロールを付与<option value=kick${c.ageAction === 'kick' ? ' selected' : ''}>キックする</select></label><label>隔離ロール<select name=qRole><option value="">指定しない${ro}</select></label><label>レイド検知: 何秒以内に<input name=raidSec type=number min=5 max=3600 value=${+c.raidSec || 60}></label><label>レイド検知: 何人以上が参加したら招待を停止するか(0で無効)<input name=raidN type=number min=0 max=1000 value=${+c.raidN || 0}></label><label>アラートを投稿するチャンネル(任意)<select name=alertChan><option value="">投稿しない${co}</select></label></form>`), own ? FORM : BASE));
+}));
+app.post('/guard', auth('release'), (req, res) => {
+  const n = (v, lo, hi, d) => Math.min(hi, Math.max(lo, Math.floor(+v) || d)), b = req.body;
+  db.cfg[req.u.gid] = { minAge: n(b.minAge, 0, 365, 0), ageAction: b.ageAction === 'kick' ? 'kick' : 'role', qRole: isId(b.qRole) ? b.qRole : '', raidSec: n(b.raidSec, 5, 3600, 60), raidN: n(b.raidN, 0, 1000, 0), alertChan: isId(b.alertChan) ? b.alertChan : '' };
+  save(); log(req.u.name, '荒らし対策の設定を変更', '', JSON.stringify(db.cfg[req.u.gid]), req.u.gid); res.send(done(req.u, '荒らし対策', '保存しました。すぐに反映されます。'));
+});
+app.get('/vclog', auth(), (req, res) => {
+  const q = String(req.query.q || '').trim().toLowerCase();
+  const rows = db.vclog.filter(v => v.gid === req.u.gid && (!q || v.uid === q || v.name.toLowerCase().includes(q))).slice(0, 200).map(v => tr([esc(v.t), esc(v.name), esc(v.uid), esc(v.kind), esc(v.kind === '移動' ? `${v.from} → ${v.to}` : v.kind === '入室' ? v.to : v.from), esc(v.note || '-')]));
+  res.send(page(req.u, 'VC履歴', fs_(`VCの入退室履歴(${gname(req.u.gid)} / 新しい順)`, `<form method=get class=main><label>名前またはIDで絞り込み<input name=q value="${esc(q)}"></label></form>` + (rows.length ? table(['日時', '名前', 'ユーザーID', '動作', 'VC', '備考'], rows) : empty('記録はありません。'))), [...BASE, '照会']));
+});
+
+// バックアップ(スナップショット)と復元 — 最高管理者のみ
+const SNAPDIR = 'data/snapshots'; fs.mkdirSync(SNAPDIR, { recursive: true });
+async function takeSnapshot(gid, by) {
+  const g = await bot.guilds.fetch(gid); await g.channels.fetch(); await g.roles.fetch();
+  const roles = [...g.roles.cache.values()].filter(r => r.id !== g.id && !r.managed).map(r => ({ id: r.id, name: r.name, color: r.color, hoist: r.hoist, mentionable: r.mentionable, permissions: r.permissions.bitfield.toString(), position: r.position }));
+  const channels = [...g.channels.cache.values()].filter(c => [0, 2, 4, 5, 13, 15].includes(c.type)).map(c => ({ id: c.id, name: c.name, type: c.type, parentId: c.parentId || null, position: c.rawPosition, topic: c.topic || null, nsfw: !!c.nsfw, rateLimitPerUser: c.rateLimitPerUser || 0, bitrate: c.bitrate || null, userLimit: c.userLimit || 0,
+    overwrites: [...(c.permissionOverwrites ? c.permissionOverwrites.cache.values() : [])].map(o => ({ id: o.id, type: o.type, allow: o.allow.bitfield.toString(), deny: o.deny.bitfield.toString() })) }));
+  const id = nid();
+  fs.writeFileSync(`${SNAPDIR}/${gid}-${id}.json`, JSON.stringify({ gid, name: g.name, at: now(), by, roles, channels, roleNames: Object.fromEntries(roles.map(r => [r.id, r.name])) }));
+  db.snaps.unshift({ id, gid, ts: Date.now(), at: now(), by, roles: roles.length, channels: channels.length });
+  const mine = db.snaps.filter(x => x.gid === gid), old = mine.slice(30);
+  old.forEach(x => { try { fs.unlinkSync(`${SNAPDIR}/${gid}-${x.id}.json`); } catch (e) {} }); db.snaps = db.snaps.filter(x => !old.includes(x));
+  save(); return id;
+}
+setInterval(() => GIDS.forEach(gid => { const l = db.snaps.find(x => x.gid === gid); if (!l || Date.now() - l.ts > 864e5) takeSnapshot(gid, 'システム(自動)').catch(() => {}); }), 36e5);
+async function restoreSnapshot(gid, id, o, by) {
+  const snap = JSON.parse(fs.readFileSync(`${SNAPDIR}/${gid}-${id}.json`, 'utf8')), g = await bot.guilds.fetch(gid);
+  await g.channels.fetch(); await g.roles.fetch();
+  const r = { rolesMade: 0, rolesFixed: 0, chMade: 0, permFixed: 0, errs: [] }, byName = n => [...g.roles.cache.values()].find(x => x.name === n), cur = () => [...g.channels.cache.values()];
+  for (const x of snap.roles) {
+    const ex = byName(x.name);
+    try {
+      if (!ex && o.roles) { await g.roles.create({ name: x.name, color: x.color, hoist: x.hoist, mentionable: x.mentionable, permissions: BigInt(x.permissions), reason: `復元 by ${by}` }); r.rolesMade++; }
+      else if (ex && o.rolePerm && ex.editable && ex.permissions.bitfield.toString() !== x.permissions) { await ex.setPermissions(BigInt(x.permissions), `復元 by ${by}`); r.rolesFixed++; }
+    } catch (e) { r.errs.push(`ロール${x.name}: ${e.message}`); }
+  }
+  await g.roles.fetch();
+  const rid = i => { if (i === snap.gid) return g.id; const n = snap.roleNames[i], z = n && byName(n); return z ? z.id : i; };
+  const ow = c => c.overwrites.map(x => ({ id: x.type === 0 ? rid(x.id) : x.id, type: x.type, allow: BigInt(x.allow), deny: BigInt(x.deny) }));
+  const pName = c => c.parentId ? ((snap.channels.find(x => x.id === c.parentId) || {}).name || null) : null;
+  const match = c => cur().find(x => x.name === c.name && x.type === c.type && ((x.parent && x.parent.name) || null) === pName(c));
+  const order = snap.channels.filter(c => c.type === 4).concat(snap.channels.filter(c => c.type !== 4));
+  if (o.channels) for (const c of order) {
+    if (match(c)) continue;
+    const pn = pName(c), parent = pn ? (cur().find(x => x.type === 4 && x.name === pn) || {}).id : undefined;
+    try { await g.channels.create({ name: c.name, type: c.type, parent, topic: c.topic || undefined, nsfw: c.nsfw, rateLimitPerUser: c.rateLimitPerUser || undefined, bitrate: c.bitrate || undefined, userLimit: c.userLimit || undefined, permissionOverwrites: ow(c), reason: `復元 by ${by}` }); r.chMade++; }
+    catch (e) { r.errs.push(`チャンネル${c.name}: ${e.message}`); }
+  }
+  if (o.chPerm) for (const c of order) { const ex = match(c); if (ex && ex.permissionOverwrites) try { await ex.permissionOverwrites.set(ow(c), `復元 by ${by}`); r.permFixed++; } catch (e) { r.errs.push(`権限${c.name}: ${e.message}`); } }
+  return r;
+}
+app.get('/snap', auth('release'), (req, res) => {
+  const rows = db.snaps.filter(x => x.gid === req.u.gid).map(x => tr([esc(x.at), esc(x.by), `${x.roles}個 / ${x.channels}個`,
+    `<a class=b href=/snap/${x.id}/download>ダウンロード</a> <form method=post action=/snap/${x.id}/restore onsubmit="return confirm('このバックアップから復元します。よろしいですか?')"><label><input type=checkbox name=roles value=1 checked> 不足しているロールを作り直す</label><label><input type=checkbox name=rolePerm value=1> 既存ロールの権限を保存時に戻す</label><label><input type=checkbox name=channels value=1 checked> 不足しているチャンネル・カテゴリを作り直す</label><label><input type=checkbox name=chPerm value=1> 既存チャンネルの権限設定を保存時に戻す</label>${PW}<button>復元する</button></form>`]));
+  res.send(page(req.u, 'バックアップ', fs_(`サーバー構成のバックアップ(${gname(req.u.gid)})`, note('チャンネル・カテゴリ・ロールとその権限を、JSONで保存します。復元は、消えたものを作り直し、権限を保存時の状態に戻します(削除はしません)。復元したロールは、順位が一番下になります。毎日1回、自動でも保存されます(30件まで)。') + btn('/snap', '今すぐバックアップする', 'いまの構成を保存します。よろしいですか?')) + fs_('保存済みのバックアップ', rows.length ? table(['日時', '作成者', 'ロール / チャンネル', '操作'], rows) : empty('まだありません。'))));
+});
+app.post('/snap', auth('release'), run(async (req, res) => { const id = await takeSnapshot(req.u.gid, req.u.name); log(req.u.name, 'バックアップ作成', String(id), '', req.u.gid); res.redirect('/snap'); }));
+app.get('/snap/:id/download', auth('release'), (req, res) => {
+  const x = db.snaps.find(y => y.id === +req.params.id && y.gid === req.u.gid); if (!x) return res.redirect('/snap');
+  res.setHeader('Content-Type', 'application/json; charset=utf-8'); res.setHeader('Content-Disposition', `attachment; filename=snapshot-${x.id}.json`);
+  res.send(fs.readFileSync(`${SNAPDIR}/${x.gid}-${x.id}.json`, 'utf8'));
+});
+app.post('/snap/:id/restore', auth('release'), run(async (req, res) => {
+  const u = req.u, x = db.snaps.find(y => y.id === +req.params.id && y.gid === u.gid);
+  if (!x) return bad(res, u, 'バックアップが見つかりません');
+  if (!pwOk(u, req)) return bad(res, u, 'パスワードが違います(危険操作はパスワードの再入力が必要です)');
+  const b = req.body, r = await restoreSnapshot(u.gid, x.id, { roles: !!b.roles, rolePerm: !!b.rolePerm, channels: !!b.channels, chPerm: !!b.chPerm }, u.name);
+  log(u.name, 'バックアップから復元', String(x.id), `ロール作成${r.rolesMade}/権限修正${r.rolesFixed}/チャンネル作成${r.chMade}/権限修正${r.permFixed}/失敗${r.errs.length}`, u.gid);
+  res.send(done(u, '復元', `ロール作成${r.rolesMade}件、ロール権限の修正${r.rolesFixed}件、チャンネル作成${r.chMade}件、チャンネル権限の修正${r.permFixed}件。失敗${r.errs.length}件${r.errs.length ? '(' + r.errs.slice(0, 5).join(' / ') + ')' : ''}`));
+}));
+
+// 端末の承認制(ブラウザごとの識別cookie)。最高管理者は対象外
+const devToken = (req, res) => { let t = ((req.headers.cookie || '').match(/(?:^|; )did=([a-f0-9]{32})/) || [])[1]; if (!t) { t = crypto.randomBytes(16).toString('hex'); res.cookie('did', t, { httpOnly: true, sameSite: 'lax', secure: !!req.secure, maxAge: 400 * 864e5 }); } return t; };
+function deviceBlock(req, res, u) {
+  if (!u.devGuard || u.role === 'owner') return null;
+  const t = devToken(req, res);
+  if ((u.devs || []).some(d => d.t === t)) return null;
+  if (!db.devreq.some(r => r.uid === u.id && r.t === t && r.status === '承認待ち')) {
+    db.devreq.unshift({ id: nid(), uid: u.id, name: u.name, t, ua: String(req.headers['user-agent'] || '').slice(0, 200), ip: req.ip, at: now(), status: '承認待ち' }); db.devreq = db.devreq.slice(0, 200);
+    const tm = now(); db.users.filter(x => x.role === 'owner').forEach(x => GIDS.forEach(gid => db.msgs.unshift({ id: nid(), t: tm, from: 'システム', to: x.name, subject: '【未登録の端末からのログイン】', text: `${u.name} が、未登録の端末からログインしようとしました。アカウント管理で承認または却下してください。`, read: false, gid })));
+    save(); log('システム', '未登録の端末からのログイン', u.name, req.ip);
+  }
+  return 'この端末は未登録です。最高管理者の承認をお待ちください(承認後に、もう一度ログインしてください)。';
+}
+const devPending = () => { const rows = db.devreq.filter(r => r.status === '承認待ち').map(r => tr([esc(r.name), esc(r.at), esc(r.ip), esc(r.ua), `<form method=post action=/devices/${r.id} style="display:inline"><button name=a value=ok>承認</button> <button name=a value=no>却下</button></form>`])); return fs_('未登録の端末の承認待ち', rows.length ? table(['アカウント', '日時', 'IPアドレス', 'ブラウザ情報', '操作'], rows) : empty('承認待ちの端末はありません。')); };
+app.post('/devices/reset', auth('accounts'), (req, res) => { const t = db.users.find(x => x.id === +req.body.id); if (t) { t.devs = []; save(); log(req.u.name, '登録端末をリセット', t.name); } res.redirect('/accounts'); });
+app.post('/devices/:id', auth('accounts'), (req, res) => {
+  const r = db.devreq.find(x => x.id === +req.params.id && x.status === '承認待ち'); if (!r) return res.redirect('/accounts');
+  if (req.body.a === 'ok') { const t = db.users.find(x => x.id === r.uid); if (t) (t.devs ??= []).push({ t: r.t, ua: r.ua, ip: r.ip, at: now() }); r.status = '承認済'; } else r.status = '却下';
+  save(); log(req.u.name, `端末${r.status}`, r.name, r.ip); res.redirect('/accounts');
+});
 
 // ---- 全メッセージ管理(最高管理者のみ・他の人のメッセージも削除可) ----
 app.get('/allmsgs', auth('delMsg'), (req, res) => {
@@ -679,21 +879,21 @@ app.post('/allmsgs/:id/delete', auth('delMsg'), (req, res) => {
 
 // ---- アカウント管理(最高管理者のみ) ----
 app.get('/accounts', auth('accounts'), (req, res) => {
-  const rows = db.users.map(x => tr([esc(x.name), ROLES[x.role], esc(x.discordId || '-'), x.mfa ? `必須(${esc(x.email ? maskMail(x.email) : '-')})` : '-', x.role === 'owner' ? '全て' : esc(allowed(x).map(gname).join(', ') || 'なし'), x.id === req.u.id ? '(自分)' : `<form method=post action=/accounts/delete onsubmit="return confirm('このアカウントを削除しますか?')"><input type=hidden name=id value=${x.id}>${PW}<button>削除</button></form>`]));
-  res.send(page(req.u, 'アカウント管理', fs_('追加 / 更新(既存の名前なら権限・パスワードを更新)', `<form method=post><label>アカウント名(英数字3〜20)<input name=name required></label><label>パスワード(8文字以上。更新時は空欄で変更なし)<input name=pass type=password autocomplete=new-password></label><label>DiscordユーザーID(任意。緊急招集・新着通知に使います)<input name=did inputmode=numeric></label><label>メールアドレス(2段階認証用。空欄なら変更しません)<input name=email type=email></label><label>メールによる2段階認証<select name=mfa><option value=keep>変更しない(新規は不要)<option value=on>必須にする<option value=off>不要にする</select></label><label>(2段階認証を不要にするときだけ)あなたのパスワード<input type=password name=pw autocomplete=current-password></label><label>権限<select name=role>${Object.entries(ROLES).map(([k, v]) => `<option value=${k}>${v}`).join('')}</select></label><div>操作できるサーバー(最高管理者は全サーバー): ${GIDS.map(g => `<label><input type=checkbox name=g value="${g}"> ${esc(gname(g))}</label> `).join('')}</div><br><button>保存</button></form>`) + fs_('メール送信のテスト(2段階認証用)', `${note(MAIL_OK ? 'Gmailの送信設定は有効です。2段階認証を必須にする前に、テストメールが届くか確認してください。' : '未設定です(環境変数 GMAIL_USER と GMAIL_APP_PASSWORD が必要です)')}<form method=post action=/mfa/test><label>送信先<input name=email type=email required></label><button>テストメールを送る</button></form>`) + fs_('アカウント一覧', table(['アカウント', '権限', 'DiscordID', '2段階認証', '操作できるサーバー', '操作'], rows))));
+  const rows = db.users.map(x => tr([esc(x.name) + (x.frozen ? ` <b>【凍結中: ${esc(x.frozen.reason)}】</b><form method=post action=/accounts/unfreeze style="display:inline"><input type=hidden name=id value=${x.id}><button>凍結を解除</button></form>` : ''), ROLES[x.role], esc(x.discordId || '-'), x.mfa ? `必須(${esc(x.email ? maskMail(x.email) : '-')})` : '-', x.devGuard ? `承認制(登録${(x.devs || []).length}台) <form method=post action=/devices/reset style="display:inline"><input type=hidden name=id value=${x.id}><button>登録をリセット</button></form>` : '-', x.role === 'owner' ? '全て' : esc(allowed(x).map(gname).join(', ') || 'なし'), x.id === req.u.id ? '(自分)' : `<form method=post action=/accounts/delete onsubmit="return confirm('このアカウントを削除しますか?')"><input type=hidden name=id value=${x.id}>${PW}<button>削除</button></form>`]));
+  res.send(page(req.u, 'アカウント管理', fs_('追加 / 更新(既存の名前なら権限・パスワードを更新)', `<form method=post><label>アカウント名(英数字3〜20)<input name=name required></label><label>パスワード(8文字以上。更新時は空欄で変更なし)<input name=pass type=password autocomplete=new-password></label><label>DiscordユーザーID(任意。緊急招集・新着通知に使います)<input name=did inputmode=numeric></label><label>メールアドレス(2段階認証用。空欄なら変更しません)<input name=email type=email></label><label>メールによる2段階認証<select name=mfa><option value=keep>変更しない(新規は不要)<option value=on>必須にする<option value=off>不要にする</select></label><label>未登録の端末からのログイン<select name=devg><option value=keep>変更しない(新規は不要)<option value=on>最高管理者の承認制にする<option value=off>制限しない</select></label><label>(2段階認証を不要にするときだけ)あなたのパスワード<input type=password name=pw autocomplete=current-password></label><label>権限<select name=role>${Object.entries(ROLES).map(([k, v]) => `<option value=${k}>${v}`).join('')}</select></label><div>操作できるサーバー(最高管理者は全サーバー): ${GIDS.map(g => `<label><input type=checkbox name=g value="${g}"> ${esc(gname(g))}</label> `).join('')}</div><br><button>保存</button></form>`) + devPending() + fs_('メール送信のテスト(2段階認証用)', `${note(MAIL_OK ? 'Gmailの送信設定は有効です。2段階認証を必須にする前に、テストメールが届くか確認してください。' : '未設定です(環境変数 GMAIL_USER と GMAIL_APP_PASSWORD が必要です)')}<form method=post action=/mfa/test><label>送信先<input name=email type=email required></label><button>テストメールを送る</button></form>`) + fs_('アカウント一覧', table(['アカウント', '権限', 'DiscordID', '2段階認証', '端末承認', '操作できるサーバー', '操作'], rows))));
 });
 app.post('/accounts', auth('accounts'), (req, res) => {
   const { name, pass, role } = req.body, ex = db.users.find(x => x.name === name);
   const gs = [].concat(req.body.g || []).filter(g => GIDS.includes(g)), did = String(req.body.did || '').trim();
-  const email = String(req.body.email || '').trim(), mfa = ['on', 'off'].includes(req.body.mfa) ? req.body.mfa : 'keep';
+  const email = String(req.body.email || '').trim(), mfa = ['on', 'off'].includes(req.body.mfa) ? req.body.mfa : 'keep', devg = ['on', 'off'].includes(req.body.devg) ? req.body.devg : 'keep';
   if (!/^[\w-]{3,20}$/.test(name || '') || !ROLES[role] || (pass && pass.length < 8) || (!ex && !pass) || (ex && ex.id === req.u.id && role !== 'owner') || (role !== 'owner' && !gs.length) || (did && !isId(did)) || (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)))
     return bad(res, req.u, '入力が正しくありません(自分自身の権限は下げられません / 最高管理者以外は操作できるサーバーを1つ以上選んでください)');
   const mail = email || (ex && ex.email) || '';
   if (mfa === 'on' && !mail) return bad(res, req.u, '2段階認証を必須にするには、メールアドレスが必要です');
   if (mfa === 'on' && !MAIL_OK) return bad(res, req.u, 'メール送信が未設定のため、2段階認証を必須にできません(GMAIL_USER / GMAIL_APP_PASSWORD)');
   if (mfa === 'off' && ex && ex.mfa && !pwOk(req.u, req)) return bad(res, req.u, '2段階認証を不要にするには、あなたのパスワードの入力が必要です');
-  if (ex) { ex.role = role; ex.guilds = gs; if (did) ex.discordId = did; if (email) ex.email = email; if (mfa !== 'keep') ex.mfa = mfa === 'on'; if (pass) ex.hash = bcrypt.hashSync(pass, 10); }
-  else db.users.push({ id: nid(), name, hash: bcrypt.hashSync(pass, 10), role, guilds: gs, discordId: did || undefined, email: email || undefined, mfa: mfa === 'on' });
+  if (ex) { ex.role = role; ex.guilds = gs; if (did) ex.discordId = did; if (email) ex.email = email; if (mfa !== 'keep') ex.mfa = mfa === 'on'; if (devg !== 'keep') ex.devGuard = devg === 'on'; if (pass) ex.hash = bcrypt.hashSync(pass, 10); }
+  else db.users.push({ id: nid(), name, hash: bcrypt.hashSync(pass, 10), role, guilds: gs, discordId: did || undefined, email: email || undefined, mfa: mfa === 'on', devGuard: devg === 'on' });
   save(); log(req.u.name, ex ? 'アカウント更新' : 'アカウント追加', name, ROLES[role]); res.redirect('/accounts');
 });
 app.post('/accounts/delete', auth('accounts'), (req, res) => {
