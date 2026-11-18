@@ -2,6 +2,7 @@ require('dotenv').config();
 const fs = require('fs'), express = require('express'), session = require('express-session'), bcrypt = require('bcryptjs');
 const { Client, GatewayIntentBits: G, Partials, Events, EmbedBuilder } = require('discord.js');
 const crypto = require('crypto');
+const SITE = process.env.SITE_TITLE || '管理システム端末';
 const { DISCORD_TOKEN, GUILD_ID, SESSION_SECRET, OWNER_USER = 'owner', OWNER_PASS, PORT = 3000 } = process.env;
 const GIDS = (process.env.GUILD_IDS || GUILD_ID || '').split(',').map(x => x.trim()).filter(Boolean);
 if (!GIDS.length) { console.error('GUILD_IDS(サーバーID。複数ならカンマ区切り)を設定してください'); process.exit(1); }
@@ -52,6 +53,7 @@ const log = (who, op, target = '', detail = '', gid) => {
 };
 async function exec(by, type, uid, reason, min, notify, gid) {
   if (!GIDS.includes(gid)) throw new Error('サーバーが選択されていません');
+  if (!bot.isReady()) throw new Error('BOT_OFFLINE');
   if (notify && reason) await bot.users.send(uid, `【${gname(gid)} / ${TYPES[type]}】${reason}`).catch(() => {});
   if (type !== 'warn') {
     const g = await bot.guilds.fetch(gid);
@@ -65,6 +67,7 @@ async function exec(by, type, uid, reason, min, notify, gid) {
   db.cases.unshift({ id: nid(), t: now(), type, uid, reason, min, by, gid }); save();
   log(by, pun(type, min), uid, reason, gid);
   if (type === 'ban') freezeCheck(by, 'ban', 3, '1分間に3人以上をBANしました', gid);
+  notifyOwners(by, type, uid, reason, min, gid);
 }
 
 // ---- 画面部品 ----
@@ -72,8 +75,8 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const KEYS = ['メニュー', '戻る', '保存', '更新', '開始', '終了', '承認', '却下', '照会', '発信', '予約', '保持', '解放'];
 const ACT = { メニュー: "location='/'", 戻る: 'history.back()', 更新: 'location.reload()', 終了: "location='/logout'", 照会: 'doLookup()', 発信: 'doSend()', 解放: 'doReset()', 予約: 'doSched()' };
 const BASE = ['メニュー', '戻る', '更新', '終了'], FORM = [...BASE, '照会', '発信', '解放'];
-const status = u => `<div class=st>係員 <span class=v>${esc(u.name)}</span> 権限区分 <span class=v>${ROLES[u.role]}</span> サーバー <form method=post action=/server><select name=gid onchange="this.form.submit()">${allowed(u).map(g => `<option value="${g}"${g === u.gid ? ' selected' : ''}>${esc(gname(g))}`).join('')}</select></form> 日時 <span class=v>${now()}</span> BOT <span class=v>${bot.isReady() ? `稼働中 ${bot.ws.ping}ms` : '停止中'}</span> 未読 <span class=v>${db.msgs.filter(m => m.to === u.name && !m.read && m.gid === u.gid).length} 件</span> <a class=b href=/inbox>管理者間通信</a> <a class=b href=/lock>端末ロック</a> <a class=b href=# onclick="dk();return false">ダークモード</a> <small id=ol>${online(u)}</small></div><div id=sa class="note alert" style="display:${staleItems(u).length ? 'block' : 'none'}">未対応のまま2時間以上放置されている案件が${staleItems(u).length}件あります</div><div id=sb class="note alert" style="display:${unack(u) ? 'block' : 'none'}"><a href=/alerts>警告アラートが<span id=sbn>${unack(u)}</span>件あります(確認する)</a></div>`;
-const page = (u, title, body, on = BASE, act = {}) => `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>管理システム端末</title><style>
+const status = u => `<div class=st>係員 <span class=v>${esc(u.name)}</span> 権限区分 <span class=v>${ROLES[u.role]}</span> サーバー <form method=post action=/server><select name=gid onchange="this.form.submit()">${allowed(u).map(g => `<option value="${g}"${g === u.gid ? ' selected' : ''}>${esc(gname(g))}`).join('')}</select></form> 日時 <span class=v id=cl>${now()}</span> BOT <span class=v>${bot.isReady() ? `稼働中 ${bot.ws.ping}ms` : '停止中'}</span> 未読 <span class=v>${db.msgs.filter(m => m.to === u.name && !m.read && m.gid === u.gid).length} 件</span> <a class=b href=/inbox>管理者間通信</a> <a class=b href=/lock>端末ロック</a> <a class=b href=# onclick="dk();return false">ダークモード</a> <small id=ol>${online(u)}</small></div><div id=sa class="note alert" style="display:${staleItems(u).length ? 'block' : 'none'}">未対応のまま2時間以上放置されている案件が${staleItems(u).length}件あります</div><div id=sb class="note alert" style="display:${unack(u) ? 'block' : 'none'}"><a href=/alerts>警告アラートが<span id=sbn>${unack(u)}</span>件あります(確認する)</a></div>`;
+const page = (u, title, body, on = BASE, act = {}) => `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>${esc(SITE)}</title><style>
 body{margin:0;background:#d9d9d9;font:14px sans-serif;color:#111}
 h1{margin:0;background:linear-gradient(#2a45b5,#1a2f9a);color:#fff;text-align:center;font-weight:400;font-size:15px;letter-spacing:.2em;padding:13px 8px}
 .w{max-width:1000px;margin:0 auto;padding:10px}.tb{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px}
@@ -84,22 +87,28 @@ input,select,textarea{font:inherit;padding:7px;box-sizing:border-box;background:
 form input:not([type=checkbox]),form select,form textarea{width:100%;max-width:600px;display:block;margin:4px 0 12px}
 fieldset{border:1px solid #999;padding:10px;margin:0 0 12px}
 table{width:100%;border-collapse:collapse;background:#f4f4f4}td,th{border:1px solid #999;padding:7px;text-align:left;vertical-align:top;white-space:pre-wrap}th{background:#c8c8c8}
-.note{background:#eee;border:1px solid #999;padding:9px;margin:6px 0 12px}.alert{background:#fdd;border-color:#c00;color:#900;font-weight:700;animation:bl 1s step-start infinite}@keyframes bl{50%{opacity:.35}}
+.note{background:#eee;border:1px solid #999;padding:9px;margin:6px 0 12px}.alert{background:#fdd;border-color:#c00;color:#900;font-weight:700;animation:bl 1s step-start infinite}@keyframes bl{50%{opacity:.35}}.busy{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.4);z-index:99;align-items:center;justify-content:center;flex-direction:column;color:#fff;font-size:18px}.busy.on{display:flex}.sp{width:40px;height:40px;border:5px solid #fff;border-top-color:transparent;border-radius:50%;animation:rot 1s linear infinite;margin-bottom:12px}@keyframes rot{to{transform:rotate(360deg)}}
 .g{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px}
 .tile{display:block;background:#e4e4e4;border:2px outset #fff;padding:12px 8px;text-align:center;color:#111;text-decoration:none;min-height:48px}
 .tile small{display:block;margin-top:6px;background:#eee;border:1px solid #999;padding:2px;font-size:12px}.tile.off{background:#d0d0d0;border:2px solid #ccc}
-button,a.b,.tile{-webkit-tap-highlight-color:transparent;touch-action:manipulation;user-select:none}button:active:not(:disabled),a.b:active{border-style:inset;background:#c4c4c4;padding:11px 16px 7px}.tile:not(.off):active{border-style:inset;background:#c4c4c4;padding:14px 8px 10px}a.cur{border-style:inset;background:#cfcfcf}button:disabled[data-t]{border-style:inset;color:#555}html.dk{filter:invert(1) hue-rotate(180deg)}</style><script>try{if(localStorage.getItem('dk')==='1')document.documentElement.classList.add('dk')}catch(e){}</script><h1>管理システム端末 ${esc(title)}</h1><div class=w>
+button,a.b,.tile{-webkit-tap-highlight-color:transparent;touch-action:manipulation;user-select:none}button:active:not(:disabled),a.b:active{border-style:inset;background:#c4c4c4;padding:11px 16px 7px}.tile:not(.off):active{border-style:inset;background:#c4c4c4;padding:14px 8px 10px}a.cur{border-style:inset;background:#cfcfcf}button:disabled[data-t]{border-style:inset;color:#555}html.dk{filter:invert(1) hue-rotate(180deg)}</style><script>try{if(localStorage.getItem('dk')==='1')document.documentElement.classList.add('dk')}catch(e){}</script><h1>${esc(SITE)} ${esc(title)}</h1><div class=w>
 <div class=tb>${KEYS.map(k => on.includes(k) ? `<button type=button class=on onclick="${act[k] || ACT[k]}">${k}</button>` : `<button disabled>${k}</button>`).join('')}</div>
-${u ? status(u) + '<div id=nb class=note style="display:none"><a href=/inbox>管理者間通信に新着メッセージがあります</a></div>' : ''}${body}</div><script>
+${u ? status(u) + '<div id=nb class=note style="display:none"><a href=/inbox>管理者間通信に新着メッセージがあります</a></div>' : ''}${body}</div><div id=busy class=busy><div class=sp></div>処理中…しばらくお待ちください</div><script>
 function F(){return document.querySelector('form.main')}
 function doLookup(){var f=F(),i=f&&f.elements.uid;if(f&&f.method=='get')f.submit();else location='/history'+(i&&i.value?'?uid='+encodeURIComponent(i.value):'')}
 function doSend(){var f=F();if(f){f.requestSubmit?f.requestSubmit():f.submit()}}
 function doReset(){var f=F();if(f)f.reset()}
 document.addEventListener('touchstart',function(){},true);
+var BZ=false;function busy(on){BZ=on;var b=document.getElementById('busy');if(b)b.className='busy'+(on?' on':'')}
+document.addEventListener('submit',function(e){if(e.defaultPrevented)return;if(BZ){e.preventDefault();return}busy(true);setTimeout(function(){busy(false)},30000)},false);
+window.addEventListener('pageshow',function(){busy(false)});
+setInterval(function(){var c=document.getElementById('cl');if(c)c.textContent=new Date(Date.now()+9*3600e3).toISOString().slice(0,16).replace('T',' ')},10000);
+function qd(m){var w=document.querySelector('[name=when]');if(w)w.value=new Date(Date.now()+9*3600e3+m*6e4).toISOString().slice(0,16)}
+function qt(h,dd){var w=document.querySelector('[name=when]');if(!w)return;var d=new Date(Date.now()+9*3600e3);d.setUTCDate(d.getUTCDate()+dd);d.setUTCHours(h,0,0,0);if(d.getTime()<Date.now()+9*3600e3)d.setUTCDate(d.getUTCDate()+1);w.value=d.toISOString().slice(0,16)}
 document.addEventListener('touchstart',function(){},{passive:true});
 document.addEventListener('submit',function(e){if(e.defaultPrevented)return;var b=e.submitter;if(b&&b.tagName==='BUTTON'&&!b.dataset.t){setTimeout(function(){b.dataset.t=b.textContent;b.textContent='処理中…';b.disabled=true},0)}},false);
 window.addEventListener('pageshow',function(){document.querySelectorAll('button[data-t]').forEach(function(b){b.disabled=false;b.textContent=b.dataset.t;delete b.dataset.t})});
-function doSched(){var f=F();if(!f)return;if(!f.elements.when||!f.elements.when.value){alert('投稿日時を入力してください');return}f.action='/embed/schedule';f.requestSubmit?f.requestSubmit():f.submit()}
+function doSched(){var f=F();if(!f)return;var w=f.elements.when;if(!w)return;if(!w.value){w.value=new Date(Date.now()+9*3600e3+36e5).toISOString().slice(0,16);if(!confirm('日時が空なので、1時間後('+w.value.replace('T',' ')+')で予約します。よろしいですか?'))return}f.action='/embed/schedule';f.requestSubmit?f.requestSubmit():f.submit()}
 function dk(){var d=document.documentElement.classList.toggle('dk');try{localStorage.setItem('dk',d?'1':'0')}catch(e){}}${u ? POLL : ''}</script>`;
 const note = t => t ? `<div class=note>${esc(t)}</div>` : '';
 const fs_ = (legend, inner) => `<fieldset><legend>${esc(legend)}</legend>${inner}</fieldset>`;
@@ -113,6 +122,14 @@ const app = express();
 app.set('trust proxy', 1);
 app.use(express.urlencoded({ extended: false }));
 app.use(session({ secret: SESSION_SECRET, resave: false, saveUninitialized: false, cookie: { httpOnly: true, sameSite: 'lax', secure: 'auto', maxAge: 8 * 3600e3 } }));
+const dupe = new Map();
+app.use((req, res, next) => {
+  if (req.method !== 'POST' || !req.session || !req.session.uid || /^\/(unlock|login)/.test(req.path)) return next();
+  const k = `${req.session.uid}|${req.path}|${JSON.stringify(req.body)}`, t = Date.now(), p = dupe.get(k);
+  for (const [kk, v] of dupe) if (t - v > 5000) dupe.delete(kk);
+  if (p && t - p < 2500) return res.status(429).send(page(null, 'お待ちください', note('⚠️ 同じ操作を連続して受け付けました。処理中です。数秒おいてから、結果を確認してください。') + '<a class=b href=/>メニューへ</a>', []));
+  dupe.set(k, t); next();
+});
 
 const auth = perm => (req, res, next) => {
   const u0 = db.users.find(x => x.id === req.session.uid);
@@ -170,7 +187,7 @@ app.get('/act/:type', auth(), (req, res) => {
   if (!TYPES[t]) return res.redirect('/');
   if (!u.gid) return res.send(done(u, TYPES[t], '操作できるサーバーが割り当てられていません。'));
   const top = direct || t === 'warn' ? '' : t === 'timeout' ? '新任管理者の操作は、管理者以上の承認が必要です。タイムアウトは60分(1時間)までなら、承認なしで実行できます。' : '新任管理者の操作は、管理者以上の承認が必要です。';
-  const uid = '<label>対象のDiscordユーザーID<input name=uid required pattern="\\d{15,22}" inputmode=numeric></label>';
+  const uid = '<label>対象のDiscordユーザーID<input name=uid list=ri required pattern="\\d{15,22}" inputmode=numeric></label>' + recentIds(u);
   const rest = t === 'warn' ? '<label>警告の内容(本人にDMで送られます)<textarea name=reason rows=5 required maxlength=200></textarea></label>'
     : (t === 'timeout' ? `<label>時間<select name=min>${DUR.map(m => `<option value=${m}${m === 60 ? ' selected' : ''}>${fmtMin(m)}`).join('')}</select></label>` : '') +
       '<label>理由(任意)<input name=reason maxlength=200></label>' + (t === 'unban' ? '' : '<label><input type=checkbox name=notify value=1> この理由をBOT経由で本人にDMで送る</label>');
@@ -185,7 +202,7 @@ app.post('/act/:type', auth(), async (req, res) => {
     log(u.name, `${TYPES[t]}申請`, uid, reason, u.gid); return res.redirect('/myreqs');
   }
   try { await exec(u.name, t, uid, reason, min, notify, u.gid); res.send(done(u, TYPES[t], `${gname(u.gid)}で${pun(t, min)}を実行しました`)); }
-  catch (e) { res.status(500).send(done(u, TYPES[t], `失敗: ${e.message}`)); }
+  catch (e) { res.status(500).send(done(u, TYPES[t], explain(e))); }
 });
 
 // ---- 申請 ----
@@ -210,7 +227,7 @@ app.post('/approve/:id', auth('approve'), async (req, res) => {
   if (req.body.a === 'ok') {
     r.status = '承認済';
     try { await exec(req.u.name, r.type, r.uid, `${r.reason}(申請者:${r.by})`, r.min, r.notify, r.gid); r.result = '実行済'; }
-    catch (e) { r.result = `失敗: ${e.message}`; }
+    catch (e) { r.result = explain(e).replace(/^⚠️ /, ''); }
   } else { r.status = '却下'; r.result = '実行されません'; }
   save(); log(req.u.name, `申請${r.status}`, r.uid, `#${r.id}`, r.gid); res.redirect('/approve');
 });
@@ -240,7 +257,7 @@ app.get('/dms/:id', auth(), (req, res) => {
   if (!d) return res.redirect('/dms');
   res.send(page(req.u, 'DM受信', fs_('DM', table(['項目', '内容'], [tr(['日時', esc(d.t)]), tr(['アカウント名', esc(d.name)]), tr(['アカウントID', esc(d.uid)]), tr(['メッセージ', esc(d.text)]), tr(['対応状況', esc(stLabel(d))])])) + '<a class=b href=/dms>一覧へ</a> ' + [['todo', '未対応に戻す'], ['doing', '対応中にする'], ['done', '完了にする']].map(([x, l]) => `<form method=post action=/dms/${d.id}/st style="display:inline"><input type=hidden name=s value=${x}><button>${l}</button></form>`).join(' ')));
 });
-app.get('/dm', auth(), (req, res) => res.send(page(req.u, 'DM送信', fs_('DM送信', `<form method=post class=main><label>送信先のDiscordアカウントID<input name=uid required pattern="\\d{15,22}" inputmode=numeric></label><label>メッセージ<textarea name=text rows=7 required maxlength=1500></textarea></label></form>${note('1人あたり1時間に20通まで送れます。相手がDMを拒否していると届きません。選択中のサーバーのメンバーにだけ送れます。')}`), FORM)));
+app.get('/dm', auth(), (req, res) => res.send(page(req.u, 'DM送信', fs_('DM送信', `<form method=post class=main><label>送信先のDiscordアカウントID<input name=uid list=ri required pattern="\\d{15,22}" inputmode=numeric></label>${recentIds(req.u)}<label>メッセージ<textarea name=text rows=7 required maxlength=1500></textarea></label></form>${note('1人あたり1時間に20通まで送れます。相手がDMを拒否していると届きません。選択中のサーバーのメンバーにだけ送れます。')}`), FORM)));
 app.post('/dm', auth(), async (req, res) => {
   const u = req.u, { uid, text } = req.body;
   if (!isId(uid) || !text) return bad(res, u, '入力が正しくありません');
@@ -248,7 +265,7 @@ app.post('/dm', auth(), async (req, res) => {
   db.dmlog = db.dmlog.filter(x => x.ts > Date.now() - 36e5);
   if (db.dmlog.filter(x => x.uid === uid).length >= 20) return res.status(429).send(done(u, 'DM送信', 'この相手には1時間に20通まで送れます。しばらく待ってください。'));
   try { await bot.users.send(uid, text.slice(0, 1500)); db.dmlog.push({ uid, ts: Date.now() }); save(); log(u.name, 'DM送信', uid, '', u.gid); res.send(done(u, 'DM送信', '送信しました')); }
-  catch (e) { res.status(500).send(done(u, 'DM送信', `失敗: ${e.message}(相手がDMを拒否している可能性があります)`)); }
+  catch (e) { res.status(500).send(done(u, 'DM送信', explain(e))); }
 });
 
 // ---- 管理者間通信 ----
@@ -287,9 +304,9 @@ app.post('/inbox', auth(), (req, res) => {
 });
 
 // ---- サーバー管理(ユーザー情報・ロール・VC・招待・緊急対応・埋め込み) ----
-const run = fn => (req, res) => Promise.resolve(fn(req, res)).catch(e => res.status(500).send(done(req.u, 'エラー', `失敗: ${e.message}`)));
+const run = fn => (req, res) => Promise.race([Promise.resolve().then(() => fn(req, res)), new Promise((_, rj) => setTimeout(() => rj(new Error('TIMEOUT')), 25000))]).catch(e => { if (!res.headersSent) res.status(e.message === 'TIMEOUT' ? 504 : 500).send(done(req.u, 'エラー', explain(e))); });
 const fmtD = d => d ? new Date(d).toLocaleString('sv-SE', { timeZone: 'Asia/Tokyo' }).slice(0, 16) : '-';
-const G_ = async u => { if (!u.gid) throw new Error('サーバーが選択されていません'); return bot.guilds.fetch(u.gid); };
+const G_ = async u => { if (!u.gid) throw new Error('サーバーが選択されていません'); if (!bot.isReady()) throw new Error('BOT_OFFLINE'); return bot.guilds.fetch(u.gid); };
 const chans = (g, types = [0, 5]) => g.channels.cache.filter(c => types.includes(c.type));
 const btn = (action, label, ask, extra = '') => `<form method=post action=${action} style="display:inline" onsubmit="return confirm('${ask}')">${extra}<button>${label}</button></form>`;
 
@@ -331,7 +348,7 @@ app.post('/role', auth('direct'), run(async (req, res) => {
 app.get('/embed', auth('direct'), run(async (req, res) => {
   const u = req.u, g = await G_(u); await g.channels.fetch();
   const opts = [...chans(g).values()].sort((a, b) => a.rawPosition - b.rawPosition).map(c => `<option value=${c.id}>#${esc(c.name)}`).join('');
-  res.send(page(u, '埋め込み投稿', fs_(`埋め込み投稿(${gname(u.gid)})`, `<form method=post class=main><label>チャンネル<select name=cid>${opts}</select></label><label>タイトル<input name=title maxlength=256 required></label><label>本文<textarea name=text rows=6 maxlength=4000 required></textarea></label><label>色<input type=color name=color value="#2a45b5"></label><label>予約投稿の日時(日本時間。空欄なら今すぐ投稿)<input type=datetime-local name=when></label></form>`) + schedList(u), [...FORM, '予約']));
+  res.send(page(u, '埋め込み投稿', fs_(`埋め込み投稿(${gname(u.gid)})`, `<form method=post class=main><label>チャンネル<select name=cid>${opts}</select></label><label>タイトル<input name=title maxlength=256 required></label><label>本文<textarea name=text rows=6 maxlength=4000 required></textarea></label><label>色<input type=color name=color value="#2a45b5"></label><label>予約投稿の日時(日本時間。空欄なら今すぐ投稿)<input type=datetime-local name=when></label><div><button type=button onclick="qd(60)">1時間後</button> <button type=button onclick="qd(180)">3時間後</button> <button type=button onclick="qt(20,0)">今夜20:00</button> <button type=button onclick="qt(9,1)">明日9:00</button> <button type=button onclick="qt(20,1)">明日20:00</button></div></form>`) + schedList(u), [...FORM, '予約']));
 }));
 app.post('/embed', auth('direct'), run(async (req, res) => {
   const u = req.u, { cid, title, text, color } = req.body, g = await G_(u), c = g.channels.cache.get(cid) || await g.channels.fetch(cid).catch(() => null);
@@ -482,12 +499,12 @@ const sendMail = async (to, subject, text) => {
     if (body !== 'OK') throw new Error(body === 'NG' ? '合言葉が一致しません(ホストの MAIL_WEBHOOK_SECRET と Apps Script の合言葉を同じにしてください)' : body.startsWith('<') ? 'Apps Scriptの権限またはデプロイ設定の問題です(「アクセスできるユーザー」を「全員」にして、新しいバージョンでデプロイし直してください)' : `メール送信サービスの応答: ${body.slice(0, 60)}`);
     return;
   }
-  return mailer.sendMail({ from: `管理システム端末 <${process.env.GMAIL_USER}>`, to, subject, text });
+  return mailer.sendMail({ from: `${SITE} <${process.env.GMAIL_USER}>`, to, subject, text });
 };
 async function sendCode(req, u) {
   if (!MAIL_OK || !u.email) throw new Error('メール送信が設定されていません');
   const code = String(crypto.randomInt(0, 1e6)).padStart(6, '0');
-  await sendMail(u.email, '【管理システム端末】ログイン確認コード', `ログイン確認コード: ${code}\n有効期限は10分です。\n心当たりがない場合は、このメールを無視して、最高管理者に連絡してください。`);
+  await sendMail(u.email, `【${SITE}】ログイン確認コード`, `ログイン確認コード: ${code}\n有効期限は10分です。\n心当たりがない場合は、このメールを無視して、最高管理者に連絡してください。`);
   req.session.mfa = { uid: u.id, h: sha(code), exp: Date.now() + 6e5, tries: 0, sent: Date.now() };
 }
 const codePage = (u, t) => page(null, 'ログイン(2段階認証)', fs_('確認コードの入力', `${note(t)}${note(`${maskMail(u.email)} にコードを送りました(有効期限10分)`)}<form method=post><label>6桁のコード<input name=code inputmode=numeric autocomplete=one-time-code pattern="\\d{6}" maxlength=6 required></label><button>確認</button></form><form method=post action=/login/resend style="display:inline"><button>コードを再送する</button></form> <a class=b href=/login>最初に戻る</a>`), []);
@@ -513,7 +530,7 @@ app.post('/mfa/test', auth('accounts'), run(async (req, res) => {
   const to = String(req.body.email || '').trim();
   if (!MAIL_OK) return bad(res, req.u, 'メール送信が未設定です(環境変数 GMAIL_USER と GMAIL_APP_PASSWORD を設定してください)');
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return bad(res, req.u, 'メールアドレスが正しくありません');
-  await sendMail(to, '【管理システム端末】テストメール', 'このメールが届いていれば、2段階認証のメール送信は正常です。');
+  await sendMail(to, `【${SITE}】テストメール`, 'このメールが届いていれば、2段階認証のメール送信は正常です。');
   log(req.u.name, 'テストメール送信', '', maskMail(to)); res.send(done(req.u, 'テストメール', `${maskMail(to)} に送信しました。届いたか確認してください。`));
 }));
 
@@ -915,4 +932,30 @@ app.post('/password', auth(), (req, res) => {
   db.users.find(x => x.id === req.u.id).hash = bcrypt.hashSync(req.body.pass, 10); save(); log(req.u.name, 'パスワード変更'); res.send(done(req.u, 'パスワード変更', '変更しました'));
 });
 
+const recentIds = u => `<datalist id=ri>${[...new Set([...db.cases.filter(c => c.gid === u.gid).map(c => c.uid), ...db.dms.filter(d => visDm(u, d)).map(d => d.uid)])].slice(0, 30).map(i => `<option value=${i}>`).join('')}</datalist>`;
+function notifyOwners(by, type, uid, reason, min, gid) {
+  const a = db.users.find(x => x.name === by);
+  if (!a || a.role === 'owner' || !(['ban', 'kick', 'unban', 'untimeout'].includes(type) || (type === 'timeout' && min > 60))) return;
+  const text = `${by}が、${pun(type, min)}を実行しました(サーバー: ${gname(gid)} / 対象ID: ${uid} / 理由: ${reason || 'なし'})`, t = now();
+  db.users.filter(x => x.role === 'owner').forEach(x => { db.msgs.unshift({ id: nid(), t, from: 'システム', to: x.name, subject: '【処分の実行】', text, read: false, gid }); if (x.discordId) bot.users.send(x.discordId, `【${SITE}】${text}`).catch(() => {}); });
+  save();
+}
+const explain = e => {
+  const m = String((e && e.message) || e), c = e && (e.code || e.status);
+  if (m === 'BOT_OFFLINE') return '⚠️ Botがオフラインです。しばらくしてから、もう一度お試しください(ホストの稼働を確認してください)。';
+  if (m === 'TIMEOUT') return '⚠️ 処理に時間がかかっています。結果は「操作ログ」で確認してください。';
+  if (c === 429 || /rate ?limit|too many requests/i.test(m)) return '⚠️ Botとの通信が一時的に制限されています。5秒後にもう一度お試しください。';
+  if (c === 50013 || /missing permissions/i.test(m)) return '⚠️ Botの権限が足りません。サーバー設定で、Botのロールの権限と順位を確認してください。';
+  if (c === 50001 || /missing access/i.test(m)) return '⚠️ Botがそのチャンネルやサーバーにアクセスできません。権限を確認してください。';
+  if (c === 10007 || c === 10013 || /unknown (member|user)/i.test(m)) return '⚠️ 対象のユーザーが見つかりません。IDを確認してください。';
+  if (c === 10026 || /unknown ban/i.test(m)) return '⚠️ このユーザーはBANされていません。';
+  if (c === 10003 || /unknown channel/i.test(m)) return '⚠️ チャンネルが見つかりません。';
+  if (c === 50007 || /cannot send messages to this user/i.test(m)) return '⚠️ 相手がDMを拒否しているため、送れませんでした。';
+  if (/ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|fetch failed|socket hang up/i.test(m)) return '⚠️ Discordとの通信に失敗しました。少し待ってから、もう一度お試しください。';
+  return `⚠️ 処理に失敗しました。(詳細: ${m})`;
+};
+app.use((err, req, res, next) => { console.error(err); if (!res.headersSent) res.status(500).send(page(null, 'エラー', note(explain(err)) + '<a class=b href=/>メニューへ</a>', [])); });
+process.on('unhandledRejection', e => console.error('unhandledRejection', e));
+process.on('uncaughtException', e => console.error('uncaughtException', e));
+bot.on(Events.Error, e => console.error('bot error', e));
 app.listen(PORT, '0.0.0.0', () => console.log(`管理画面: http://localhost:${PORT}`));
